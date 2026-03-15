@@ -1,0 +1,51 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Post {
+  id           String    @id @default(cuid())
+  blogId       String    @default("")
+  naverPostId  String
+  title        String
+  url          String
+  commentCount Int       @default(0)
+  comments     Comment[]
+  postDate     DateTime?
+  lastSeenAt   DateTime?
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([blogId, naverPostId])
+}
+
+model Comment {
+  id              String   @id @default(cuid())
+  naverCommentId  String   @unique
+  postId          String
+  post            Post     @relation(fields: [postId], references: [id])
+  author          String
+  content         String
+  aiReply         String?
+  isReplied       Boolean  @default(false)
+  repliedAt       DateTime?
+  createdAt       DateTime @default(now())
+}
+
+
+model DashboardStats {
+  id             Int      @id @default(autoincrement())
+  blogId         String   @unique
+  totalReplies   Int      @default(0)
+  todayReplies   Int      @default(0)
+  lastReplyDate  DateTime?
+  lastCrawlTime  DateTime @default(now())
+}
+
+
