@@ -1,11 +1,13 @@
 const { chromium } = require('playwright');
+require('dotenv').config({ path: '../../.env' });
 
 async function testCommentScraping() {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
+  const blogId = process.env.NAVER_BLOG_ID || 'kjh_hero';
   
   // Navigate to the user's blog
-  await page.goto('https://m.blog.naver.com/kjh_hero?tab=1', { waitUntil: 'networkidle' });
+  await page.goto(`https://m.blog.naver.com/${blogId}?tab=1`, { waitUntil: 'networkidle' });
   
   // Find all posts by their links
   const posts = await page.$$eval('a[class*="link__"]', els => {
@@ -25,7 +27,7 @@ async function testCommentScraping() {
   
   for (const post of posts.slice(0, 3)) {
     console.log(`Checking post: ${post.title}`);
-    const commentUrl = `https://m.blog.naver.com/CommentList.naver?blogId=kjh_hero&logNo=${post.naverPostId}`;
+    const commentUrl = `https://m.blog.naver.com/CommentList.naver?blogId=${blogId}&logNo=${post.naverPostId}`;
     await page.goto(commentUrl, { waitUntil: 'networkidle' });
     
     // wait for comments to load

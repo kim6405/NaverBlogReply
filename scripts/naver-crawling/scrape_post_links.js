@@ -1,8 +1,11 @@
 const { chromium } = require('playwright');
+require('dotenv').config({ path: '../../.env' });
+
 (async () => {
     const b = await chromium.launch();
     const p = await b.newPage();
-    await p.goto('https://m.blog.naver.com/kjh_hero?tab=1', { waitUntil: 'networkidle' });
+    const blogId = process.env.NAVER_BLOG_ID || 'kjh_hero';
+    await p.goto(`https://m.blog.naver.com/${blogId}?tab=1`, { waitUntil: 'networkidle' });
     await p.evaluate(() => window.scrollBy(0, 10000));
     await p.waitForTimeout(2000);
     const items = await p.$$eval('a[class*="link__"]', els => els.map(e => e.href + ' || ' + e.textContent.trim()));

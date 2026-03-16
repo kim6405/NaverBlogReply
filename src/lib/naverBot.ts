@@ -386,17 +386,64 @@ export class NaverBlogBot {
                 const submitBtn = await this.page.waitForSelector('.u_cbox_reply_area .u_cbox_btn_upload', { state: 'visible', timeout: 5000 });
                 await submitBtn.click();
                 
-                // 등록 확인 대기를 3초로 단축 (등록 버튼 클릭 후 바로 다음 단계로 넘어가기 위함)
+                // 등록 확인 대기
                 await this.page.waitForSelector('.u_cbox_reply_area', { state: 'hidden', timeout: 3000 }).catch(() => {});
-
                 console.log(`[Reply] 작성 완료: ${nickName}`);
                 repliesMade++;
-                // AI 답변 생성 자체에 이미 수 초가 소요되므로, 마지막 대기는 2초면 충분합니다.
+
+                // --- 이웃 방문 로직 추가 (새 탭 처리 포함) ---
+                try {
+                    console.log(`[Visit] "${nickName}"님의 블로그 방문 시도...`);
+                    const nickLink = commentEl.locator('.u_cbox_nick').first();
+                    
+                    if (await nickLink.isVisible()) {
+                        // 클릭 시 새 탭이 열릴 것을 대비해 이벤트를 미리 대기함
+                        const pagePromise = this.page.context().waitForEvent('page');
+                        await nickLink.click();
+                        
+                        try {
+                            // 5초 이내에 새 페이지가 열리는지 확인
+                            const newPage = await pagePromise;
+                            await newPage.waitForLoadState('networkidle').catch(() => {});
+                            
+                            console.log(`[Visit] 새 탭에서 "${nickName}"님 블로그 방문 중... (3초 대기)`);
+                            await newPage.waitForTimeout(3000); 
+                            
+                            await newPage.close();
+                            console.log(`[Visit] 이웃 블로그 탭을 닫았습니다.`);
+                            
+                            // 원래 탭으로 포커스 복귀
+                            await this.page.bringToFront();
+                        } catch (timeoutErr) {
+                            // 새 탭이 열리지 않고 현재 탭에서 이동했을 경우 (또는 타임아웃)
+                            console.log(`[Visit] 새 탭이 열리지 않았습니다. 현재 페이지를 확인합니다.`);
+                            await this.page.waitForTimeout(3000);
+                            
+                            // 현재 페이지가 바뀌었다면 원래 페이지로 복귀
+                            if (!this.page.url().includes('CommentList.naver')) {
+                                await this.page.goto(targetUrl, { waitUntil: "networkidle" });
+                            }
+                        }
+                    }
+
+                    // 댓글 목록 상태 확인/대기 (복귀 후 안정화)
+                    await this.page.waitForSelector('.u_cbox_comment', { timeout: 5000 }).catch(() => {
+                        // 요소가 사라졌다면 페이지 새로고침
+                        return this.page?.goto(targetUrl, { waitUntil: "networkidle" });
+                    });
+                } catch (visitErr: any) {
+                    console.error(`[Visit] 방문 중 오류 발생 (무시하고 진행): ${visitErr.message}`);
+                    await this.page.goto(targetUrl, { waitUntil: "networkidle" }).catch(() => {});
+                }
+                // -------------------------
+
+                // 다음 처리를 위해 잠시 대기
                 await this.page.waitForTimeout(2000);
             }
         } catch (err: any) {
             console.error(`[Reply] 고유번호 ${commentNo} 처리 중 오류: ${err.message}`);
-            // 오류 발생 시에도 잠시 대기 (Rate Limit 방지)
+            // 오류 발생 시에도 원래 페이지로 복귀 시도 및 잠시 대기
+            await this.page.goto(targetUrl, { waitUntil: "networkidle" }).catch(() => {});
             await this.page.waitForTimeout(5000);
         }
     }
