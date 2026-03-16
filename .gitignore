@@ -36,6 +36,11 @@ yarn-error.log*
 # naver session
 .naver_session/
 .naver_session_scan/
+.naver_session_test_tmp/
+
+# temp files
+/tmp/
+tmp_debug*.js
 
 # vercel
 .vercel
