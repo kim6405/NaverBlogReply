@@ -3,12 +3,12 @@
 import { useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
 
-export default function DashboardClient({ 
-  initialStats, 
+export default function DashboardClient({
+  initialStats,
   initialPosts,
   defaultBlogId = ""
-}: { 
-  initialStats: any; 
+}: {
+  initialStats: any;
   initialPosts: any[];
   defaultBlogId?: string;
 }) {
@@ -30,18 +30,18 @@ export default function DashboardClient({
   // 블로그 ID가 변경되면(입력 포인트 발생 시) 통계 및 버튼 초기화
   useEffect(() => {
     setCanWriteReplies(false);
-    setDisplayStats(prev => ({
-        ...prev,
-        activePosts: 0,
-        totalReplies: 0,
-        newComments: 0
+    setDisplayStats((prev: any) => ({
+      ...prev,
+      activePosts: 0,
+      totalReplies: 0,
+      newComments: 0
     }));
   }, [blogId]);
 
   // initialStats가 서버에서 갱신되어 올 때(스캔 성공 후 router.refresh() 시) 다시 반영
   useEffect(() => {
     if (canWriteReplies) {
-        setDisplayStats(initialStats);
+      setDisplayStats(initialStats);
     }
   }, [initialStats, canWriteReplies]);
 
@@ -58,16 +58,16 @@ export default function DashboardClient({
 
     setIsRefreshing(true);
     setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type: 'scan', msg: 'AI 대댓글 일괄 생성 및 작성 시작...' }]);
-    
+
     try {
       const res = await fetch(`/api/reply?blogId=${encodeURIComponent(blogId.trim())}`, { method: 'POST' });
       const data = await res.json();
-      
+
       if (data.success) {
-        setLogs(prev => [...prev, { 
-          time: new Date().toLocaleTimeString(), 
-          type: 'success', 
-          msg: `작업 완료: 총 ${data.replyCount}개의 대댓글을 작성했습니다.` 
+        setLogs(prev => [...prev, {
+          time: new Date().toLocaleTimeString(),
+          type: 'success',
+          msg: `작업 완료: 총 ${data.replyCount}개의 대댓글을 작성했습니다.`
         }]);
         setCanWriteReplies(false); // 작업 완료 후 다시 비활성화 (필요시 재스캔 유도)
         router.refresh();
@@ -88,24 +88,24 @@ export default function DashboardClient({
     }
     setIsRefreshing(true);
     setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type: 'scan', msg: '네이버 블로그 신규 댓글 스캔 시작...' }]);
-    
+
     try {
       const res = await fetch(`/api/crawl?blogId=${encodeURIComponent(blogId.trim())}`);
       const data = await res.json();
-      
+
       if (data.success) {
         const postsWithComments = data.posts.filter((p: any) => p.commentCount > 0);
-        setLogs(prev => [...prev, { 
-          time: new Date().toLocaleTimeString(), 
-          type: 'success', 
-          msg: `블로그에서 ${data.posts.length}개의 포스트 검색 완료. (새로 대댓글을 작성할 포스트: ${postsWithComments.length}개)` 
+        setLogs(prev => [...prev, {
+          time: new Date().toLocaleTimeString(),
+          type: 'success',
+          msg: `블로그에서 ${data.posts.length}개의 포스트 검색 완료. (새로 대댓글을 작성할 포스트: ${postsWithComments.length}개)`
         }]);
-        
+
         setCanWriteReplies(true); // 스캔 완료 후 버튼 활성화
-        
+
         // URL 업데이트하여 서버 필터링 적용
         router.push(`/?blogId=${encodeURIComponent(blogId.trim())}`);
-        router.refresh(); 
+        router.refresh();
       } else {
         throw new Error(data.error || "알 수 없는 오류");
       }
@@ -133,9 +133,9 @@ export default function DashboardClient({
               <span className="text-slate-500 pl-1">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
               </span>
-              <input 
-                type="text" 
-                placeholder="네이버 ID" 
+              <input
+                type="text"
+                placeholder="네이버 ID"
                 value={blogId}
                 onChange={e => setBlogId(e.target.value)}
                 className="bg-transparent text-white px-1 outline-none w-full text-sm placeholder:text-slate-700 font-semibold"
@@ -157,18 +157,17 @@ export default function DashboardClient({
               신규 댓글 포스트
             </h2>
             <div className="flex items-center gap-3">
-              <button 
+              <button
                 onClick={handleAutoReply}
                 disabled={isRefreshing || !canWriteReplies}
-                className={`px-6 py-2.5 font-bold rounded-2xl transition-all active:scale-95 shadow-lg whitespace-nowrap ${
-                  isRefreshing || !canWriteReplies 
-                    ? 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50' 
+                className={`px-6 py-2.5 font-bold rounded-2xl transition-all active:scale-95 shadow-lg whitespace-nowrap ${isRefreshing || !canWriteReplies
+                    ? 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
                     : 'bg-green-500 text-slate-950 hover:bg-green-400 hover:shadow-green-500/30'
-                }`}
+                  }`}
               >
                 {isRefreshing ? (canWriteReplies ? '작성 중...' : '스캔 중...') : 'AI 대댓글 일괄 작성'}
               </button>
-              <button 
+              <button
                 onClick={handleRefresh}
                 disabled={isRefreshing}
                 className={`px-6 py-2.5 bg-slate-100 text-slate-900 font-bold rounded-2xl transition-all active:scale-95 shadow-lg whitespace-nowrap ${isRefreshing ? 'opacity-50 cursor-not-allowed' : 'hover:bg-white hover:shadow-white/10'}`}
@@ -177,7 +176,7 @@ export default function DashboardClient({
               </button>
             </div>
           </div>
-          
+
           <div className="space-y-4">
             {filteredPosts.length > 0 ? filteredPosts.map((post, idx) => (
               <div key={idx} className="bg-slate-900/90 p-6 rounded-3xl border border-slate-700 flex items-center justify-between group hover:bg-slate-800/80 transition-all duration-300 shadow-xl">
@@ -189,7 +188,7 @@ export default function DashboardClient({
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                   <div className="px-3 py-1 bg-green-500/10 text-green-400 text-xs font-bold rounded-full border border-green-500/20">대기중</div>
+                  <div className="px-3 py-1 bg-green-500/10 text-green-400 text-xs font-bold rounded-full border border-green-500/20">대기중</div>
                 </div>
               </div>
             )) : (
@@ -250,9 +249,9 @@ function StatCard({ title, value, unit, color, progress }: any) {
       </div>
       {progress !== undefined && (
         <div className="mt-5 w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-          <div 
-            className={`h-full ${bgColors[color]} transition-all duration-1000 ease-out shadow-[0_0_15px_rgba(255,255,255,0.1)]`} 
-            style={{ width: `${progress}%` }} 
+          <div
+            className={`h-full ${bgColors[color]} transition-all duration-1000 ease-out shadow-[0_0_15px_rgba(255,255,255,0.1)]`}
+            style={{ width: `${progress}%` }}
           />
         </div>
       )}
