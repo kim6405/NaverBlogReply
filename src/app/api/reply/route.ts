@@ -28,8 +28,8 @@ export async function POST(request: Request) {
     for (const post of postsWithComments) {
       console.log(`Processing post: ${post.title}`);
       
-      const count = await bot.writeRepliesForPost(post.url, async (commentText) => {
-        return await generateReply(commentText);
+      const count = await bot.writeRepliesForPost(post.url, async (commentText, images) => {
+        return await generateReply(commentText, images);
       });
       
       totalReplyCount += count;

@@ -4,20 +4,22 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 /**
  * 네이버 블로그 댓글에 대한 개인화된 대댓글을 생성합니다.
- * @param content 원본 댓글의 내용
+ * @param content 원본 댓글의 내용 또는 프롬프트
+ * @param imageUrls (선택 사항) 분석할 이미지 URL 리스트
  * @returns AI가 생성한 대댓글 텍스트
  */
-export async function generateReply(content: string): Promise<string> {
+export async function generateReply(content: string, images?: { inlineData: { data: string, mimeType: string } }[]): Promise<string> {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY environment variable is not set");
   }
 
-  const model = genAI.getGenerativeModel({ model: "gemini-3.1-flash-lite-preview" });
+  // 가용 모델 확인 (기존 모델 사용)
+  const modelName = "gemini-3.1-flash-lite-preview";
+  const model = genAI.getGenerativeModel({ model: modelName });
 
-  // 커스텀 프롬프트가 포함되어 있는지 확인
-  const isCustomPrompt = content.includes("역할:") || content.includes("포스트 제목은");
+  const isCustomPrompt = content.includes("역할:") || content.includes("포스트 제목");
 
-  const prompt = isCustomPrompt ? content : `
+  const promptText = isCustomPrompt ? content : `
     당신은 네이버 블로그의 주인입니다. 
     사용자가 당신의 블로그 포스트에 다음과 같은 댓글을 남겼습니다.
     
@@ -33,7 +35,12 @@ export async function generateReply(content: string): Promise<string> {
     `;
 
   try {
-    const result = await model.generateContent(prompt);
+    const parts: any[] = [{ text: promptText }];
+    if (images && images.length > 0) {
+      parts.push(...images);
+    }
+
+    const result = await model.generateContent(parts);
     const response = await result.response;
     return response.text();
   } catch (error: any) {
