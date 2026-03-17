@@ -48,26 +48,26 @@ export default async function Page({
     orderBy: { updatedAt: 'desc' }
   });
 
-  // 15일 이내 작성된 포스트 중 "실제 존재"하는 것만 필터링
-  const fifteenDaysAgo = new Date();
-  fifteenDaysAgo.setDate(fifteenDaysAgo.getDate() - 15);
+  // 30일 이내 작성된 포스트 중 "실제 존재"하는 것만 필터링 (Bot의 스캔 범위와 일치시킴)
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
   const activeMonitoringPosts = allPostsFromDb.filter((p: any) => {
-    // 1. postDate가 15일 이내여야 함
+    // 1. postDate가 30일 이내여야 함
     if (!p.postDate) return false;
-    const isWithin15Days = new Date(p.postDate) >= fifteenDaysAgo;
+    const isWithin30Days = new Date(p.postDate) >= thirtyDaysAgo;
     
     // 2. 가장 최근 스캔(lastCrawlTime)에서 실제로 발견되었는지 확인 (lastSeenAt 기준)
-    // lastSeenAt이 없거나, 스캔 시간보다 확실히 이전이면 삭제된 유령 포스트로 간주
     if (!p.lastSeenAt) return false;
     
-    const crawlTime = statsFromDb?.lastCrawlTime ? new Date(statsFromDb.lastCrawlTime).getTime() : 0;
+    // statsFromDb가 없더라도 오늘 막 새로 생긴 데이터라면 포함되도록 fallback 처리
+    const crawlTime = statsFromDb?.lastCrawlTime ? new Date(statsFromDb.lastCrawlTime).getTime() : new Date().getTime();
     const lastSeenTime = new Date(p.lastSeenAt).getTime();
     
-    // 스캔 시간과 실제 발견 시간 차이가 3분 이내인 경우만 '현재 존재하는 포스트'로 간주
-    const isCurrentlyPresent = Math.abs(crawlTime - lastSeenTime) < 180000; 
+    // 스캔 시간과 실제 발견 시간 차이가 10분 이내인 경우만 '현재 존재하는 포스트'로 간주 (여유있게 10분)
+    const isCurrentlyPresent = Math.abs(crawlTime - lastSeenTime) < 600000; 
 
-    return isWithin15Days && isCurrentlyPresent;
+    return isWithin30Days && isCurrentlyPresent;
   });
 
   // 오늘 작성된 대댓글 확인 (현재 블로그 기준)
@@ -81,7 +81,7 @@ export default async function Page({
 
   const stats = {
     newComments: allPostsFromDb.reduce((acc, p) => acc + p.commentCount, 0),
-    activePosts: activeMonitoringPosts.length, // 블로그별 15일 이내 게시물만 카운트
+    activePosts: activeMonitoringPosts.length, // 블로그별 30일 이내 게시물만 카운트
     totalReplies: todayRepliesCount, // 블로그별 오늘 작성 건수
     lastUpdate: statsFromDb?.lastCrawlTime?.toLocaleString("ko-KR", { timeStyle: 'short' }) || "업데이트 전"
   }
