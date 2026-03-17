@@ -115,6 +115,9 @@ export class NaverBlogBot {
             const logNoMatch = postUrl.match(/logNo=(\d+)/) || postUrl.match(/\/(\d+)\??/);
             const naverPostId = logNoMatch ? logNoMatch[1] : "";
             if (!naverPostId || seenLogNos.has(naverPostId)) return;
+            const isPopular = !!link.closest('[class*="popular"], [id*="popular"]');
+            if (isPopular) return;
+
             const container = link.closest('div[class*="card__"], li[class*="card__"], div[class*="item__"], li[class*="item__"], .lst_section_item, div[class*="post_area"]');
             if (!container) return;
             const titleEl = container.querySelector('strong, h3, [class*="title"], .title') || link;
