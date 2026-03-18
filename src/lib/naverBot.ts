@@ -147,9 +147,20 @@ export class NaverBlogBot {
                     await commentPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${blogId}&logNo=${p.naverPostId}`, { waitUntil: "networkidle" });
                     await commentPage.waitForSelector('.u_cbox_comment', { timeout: 3000 }).catch(() => { });
                     const data = await commentPage.$$eval('.u_cbox_comment', els => els.map(el => {
-                        const isReply = el.classList.contains('u_cbox_type_reply') || !!el.querySelector('.u_cbox_ico_reply');
-                        const isOwner = el.textContent?.includes('블로그주인') || !!el.querySelector('.u_cbox_owner');
-                        const isSecret = el.textContent?.includes('비밀 댓글입니다.');
+                        const isReply = !!el.closest('.u_cbox_reply_area');
+                        let isOwner = false;
+                        const info = el.querySelector('.u_cbox_info, .u_cbox_info_main, .u_cbox_info_base');
+                        if (info && info.closest('.u_cbox_comment') === el) {
+                            isOwner = info.textContent?.includes('블로그주인') || false;
+                        } else {
+                            const ownerBadge = el.querySelector('.u_cbox_owner');
+                            if (ownerBadge && ownerBadge.closest('.u_cbox_comment') === el) isOwner = true;
+                        }
+                        let isSecret = false;
+                        const content = el.querySelector('.u_cbox_contents, .u_cbox_secret, .u_cbox_text_wrap');
+                        if (content && content.closest('.u_cbox_comment') === el) {
+                            isSecret = content.textContent?.includes('비밀 댓글입니다.') || false;
+                        }
                         return { isReply, isOwner, isSecret };
                     }));
                     for (let j = 0; j < data.length; j++) {
@@ -158,8 +169,8 @@ export class NaverBlogBot {
                         if (!data[j].isReply && !data[j].isOwner) {
                             let has = false;
                             for (let k = j + 1; k < data.length && data[k].isReply; k++) {
-                                // 2. 대댓글 중 주인의 글이거나, 내용이 가려진 비밀 답변이 있다면 답변 완료로 간주
-                                if (data[k].isOwner || data[k].isSecret) { has = true; break; }
+                                // 2. 대댓글이 하나라도 있으면 답변 완료로 간주
+                                has = true; break;
                             }
                             if (!has) unansweredCount++;
                         }
@@ -187,23 +198,31 @@ export class NaverBlogBot {
             const ids: string[] = [];
             for (let i = 0; i < comments.length; i++) {
                 const el = comments[i];
-                const isReply = el.classList.contains('u_cbox_type_reply') || !!el.querySelector('.u_cbox_ico_reply');
-                const isOwner = el.textContent?.includes('블로그주인') || !!el.querySelector('.u_cbox_owner');
-                const isSecret = el.textContent?.includes('비밀 댓글입니다.');
+                const isReply = !!el.closest('.u_cbox_reply_area');
+                let isOwner = false;
+                const info = el.querySelector('.u_cbox_info, .u_cbox_info_main, .u_cbox_info_base');
+                if (info && info.closest('.u_cbox_comment') === el) {
+                    isOwner = info.textContent?.includes('블로그주인') || false;
+                } else {
+                    const ownerBadge = el.querySelector('.u_cbox_owner');
+                    if (ownerBadge && ownerBadge.closest('.u_cbox_comment') === el) isOwner = true;
+                }
+                let isSecret = false;
+                const content = el.querySelector('.u_cbox_contents, .u_cbox_secret, .u_cbox_text_wrap');
+                if (content && content.closest('.u_cbox_comment') === el) {
+                    isSecret = content.textContent?.includes('비밀 댓글입니다.') || false;
+                }
 
                 // 부모 댓글( !isReply )이면서 블로그 주인이 아닌 경우( !isOwner ) 답변 작성 시도 대상
                 if (!isReply && !isOwner) {
                     let has = false;
                     for (let j = i + 1; j < comments.length; j++) {
                         const nextEl = comments[j];
-                        const nextIsReply = nextEl.classList.contains('u_cbox_type_reply') || !!nextEl.querySelector('.u_cbox_ico_reply');
+                        const nextIsReply = !!nextEl.closest('.u_cbox_reply_area');
                         if (!nextIsReply) break;
 
-                        const nextIsOwner = nextEl.textContent?.includes('블로그주인') || !!nextEl.querySelector('.u_cbox_owner');
-                        const nextIsSecret = nextEl.textContent?.includes('비밀 댓글입니다.');
-                        
-                        // 이미 주인이 답변했거나 비밀 대댓글이 달려있으면 답변 완료로 판단
-                        if (nextIsOwner || nextIsSecret) { has = true; break; }
+                        // 대댓글이 존재하면 바로 답변 완료로 간주
+                        has = true; break;
                     }
                     const match = el.getAttribute('data-info')?.match(/commentNo\s*:\s*["'](\d+)["']/);
                     if (!has && match) {
@@ -217,9 +236,10 @@ export class NaverBlogBot {
             return ids;
         });
         let repliesMade = 0;
+        const neighborsToVisit = new Set<string>();
+
         for (const commentNo of targetIds) {
             try {
-                // 0. 메인 페이지가 닫혀있는지 먼저 체크 (사용자가 창을 닫았을 때 대비)
                 if (!this.page || this.page.isClosed()) {
                     console.log("[Bot] 메인 브라우저 창이 닫혀있어 작업을 중단합니다.");
                     break;
@@ -230,145 +250,155 @@ export class NaverBlogBot {
                     const nickName = await el.locator('.u_cbox_nick').innerText().catch(() => "익명");
                     const content = await el.locator('.u_cbox_contents').innerText().catch(() => "");
                     const aiReply = await generateReplyFn(content);
-                    await el.scrollIntoViewIfNeeded();
+                    // 기존에 열려있을 수 있는 다른 답글창 닫기 위해 해당 댓글 답글버튼 클릭
                     await el.locator('.u_cbox_btn_reply').first().click();
-                    const input = await this.page.waitForSelector('.u_cbox_reply_area .u_cbox_text', { state: 'visible', timeout: 5000 });
-                    await input.fill(aiReply);
-                    await this.page.locator('.u_cbox_reply_area .u_cbox_btn_upload').first().click();
+
+                    // 네이버 모바일 블로그는 대댓글 작성창(.u_cbox_write_wrap)이 이동합니다.
+                    // 현재 활성화된(visible) 작성창의 텍스트 에리어를 찾아서 입력합니다.
+                    const inputLocator = this.page.locator('.u_cbox_write_wrap .u_cbox_text').locator('visible=true').first();
+                    await inputLocator.waitFor({ state: 'visible', timeout: 5000 });
+                    
+                    // 혹시 이전 내용이 남아있다면 지우기 (모바일 환경 특성상 필요)
+                    await inputLocator.click();
+                    await this.page.keyboard.down('Control');
+                    await this.page.keyboard.press('A');
+                    await this.page.keyboard.up('Control');
+                    await this.page.keyboard.press('Backspace');
+                    
+                    await inputLocator.fill(aiReply);
+                    await this.page.waitForTimeout(500);
+                    
+                    // visible한 등록 버튼을 전역에서 찾아 클릭
+                    const uploadBtn = this.page.locator('.u_cbox_write_wrap .u_cbox_btn_upload').locator('visible=true').first();
+                    await uploadBtn.click();
+                    
                     await this.page.waitForTimeout(3000);
                     repliesMade++;
-                    const nickLink = el.locator('.u_cbox_nick').first();
-                    const pagePromise = this.context!.waitForEvent('page');
-                    await nickLink.click();
-                    const newPage = await pagePromise;
-                    await newPage.waitForLoadState('networkidle').catch(() => { });
-                    const info = await newPage.evaluate(() => {
-                        // "접근 불가" 또는 "삭제" 등의 에러 메시지가 있는지 먼저 확인
-                        const errorMsg = document.body.innerText;
-                        const isBlocked = errorMsg.includes('접근 불가') || errorMsg.includes('삭제되었습니다') || errorMsg.includes('제한된');
-                        
-                        if (isBlocked) return { isBlocked: true };
-
-                        const links = Array.from(document.querySelectorAll('a')).map(l => {
-                            const m = l.href.match(/logNo=(\d+)/) || l.href.match(/\/(\d+)\??/);
-                            let isPop = false; let c: HTMLElement | null = l; while (c && c !== document.body) { if (c.className?.includes('popular') || c.id?.includes('popular')) { isPop = true; break; } c = c.parentElement; }
-                            return { href: l.href, logNo: m ? parseInt(m[1]) : null, isPop, title: l.textContent?.trim() || "" };
-                        }).filter(c => c.logNo);
-                        const target = links.filter(c => !c.isPop).sort((a, b) => (b.logNo || 0) - (a.logNo || 0))[0] || links.sort((a, b) => (b.logNo || 0) - (a.logNo || 0))[0];
-                        const bId = new URLSearchParams(window.location.search).get('blogId') || window.location.pathname.split('/')[1];
-                        return { blogId: bId, logNo: target?.logNo, title: target?.title.replace(/사진\s*개수\s*\d+/g, "").trim() || "최신 포스트", isBlocked: false };
-                    });
-
-                    if (info.isBlocked) {
-                        console.log(`[Visit] ${nickName}님의 블로그는 접근 불가 또는 삭제된 상태입니다. 스킵합니다.`);
-                        await newPage.close().catch(() => { });
-                        continue;
-                    }
-                    if (info.logNo && info.blogId && !this.visitedNeighbors.has(info.blogId)) {
-                        console.log(`[Visit] ${info.blogId}님의 최신글("${info.title}")을 읽는 중...`);
-
-                        const postViewUrl = `https://m.blog.naver.com/${info.blogId}/${info.logNo}`;
-                        await newPage.goto(postViewUrl, { waitUntil: "networkidle" });
-                        await newPage.waitForTimeout(1500);
-
-                        const postContent = await newPage.evaluate(() => {
-                            const contentEl = document.querySelector('.se-main-container, .post_article, .se-viewer, #post-view');
-                            if (!contentEl) return { body: "", imageUrls: [] };
-
-                            const body = contentEl.textContent?.trim().replace(/\s+/g, " ").slice(0, 1000) || "";
-                            const imgs = Array.from(contentEl.querySelectorAll('img'))
-                                .map(img => img.src || img.getAttribute('data-lazy-src'))
-                                .filter(src => src && src.startsWith('http') && !src.includes('static.naver.net'))
-                                .slice(0, 2); // 최대 2장만
-
-                            return { body, imageUrls: imgs };
-                        });
-
-                        // 이미지 데이터 가져오기 (base64)
-                        const aiImages: any[] = [];
-                        for (const imgUrl of postContent.imageUrls) {
-                            try {
-                                const response = await fetch(imgUrl!);
-                                const buffer = await response.arrayBuffer();
-                                const base64 = Buffer.from(buffer).toString('base64');
-                                const mimeType = response.headers.get('content-type') || 'image/jpeg';
-                                aiImages.push({ inlineData: { data: base64, mimeType } });
-                            } catch (e) {
-                                console.error(`[Visit] 이미지 다운로드 실패: ${imgUrl}`, e);
-                            }
-                        }
-
-                        // 2. 댓글 작성 페이지로 이동
-                        const response = await newPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${info.blogId}&logNo=${info.logNo}`, { waitUntil: "networkidle" });
-                        
-                        // 이동 실패(404 등) 시 스킵
-                        if (!response || !response.ok()) {
-                            console.log(`[Visit] 댓글 페이지 이동 실패 (${response?.status()}). 스킵합니다.`);
-                            await newPage.close().catch(() => { });
-                            continue;
-                        }
-                        await newPage.waitForSelector('.u_cbox_list', { timeout: 5000 }).catch(() => { });
-
-                        const already = await newPage.evaluate(() => {
-                            // 내 닉네임을 찾기 위한 여러 시도 (댓글 작성란, 헤더 등)
-                            const myNickEl = document.querySelector('.u_cbox_write_area .u_cbox_nick, .u_header_user_name, .gnb_my_name');
-                            const myNick = myNickEl?.textContent?.trim() || "";
-
-                            if (!myNick) return false;
-
-                            // 현재 댓글 목록에 내 닉네임이 있는지 확인
-                            const commentNicks = Array.from(document.querySelectorAll('.u_cbox_nick:not(.u_cbox_write_area .u_cbox_nick)'));
-                            return commentNicks.some(n => {
-                                const text = n.textContent?.trim() || "";
-                                // 닉네임이 완전히 일치하거나 포함되어 있는지 확인
-                                return text === myNick || (myNick.length > 1 && text.includes(myNick));
-                            });
-                        });
-
-                        if (!already) {
-                            const prompt = `역할: 블로그 방문객 (다정한 이웃)
-상황: 이웃의 블로그 포스트("${info.title}")를 읽고 댓글을 남기려 합니다.
-
-[포스트 정보]
-제목: "${info.title}"
-본문 내용: "${postContent.body || "텍스트 내용이 적거나 사진 위주의 포스트입니다."}"
-
-[작성 규칙 - 필독]
-1. **텍스트 우선 분석**: 본문에 "아스파라거스의 효능", "정보 공유" 등 읽을만한 구체적인 내용이 있다면 사진은 무시하고 **본문 내용에 대해서만** 정중하게 댓글을 쓰세요.
-2. **사진은 플랜B**: 본문 내용이 거의 없거나 "오늘의 일상"처럼 단순할 때만 사진 분석 정보를 참고하여 "사진 속 ~가 멋지네요" 등을 언급하세요. (아무 내용이 없는데 사진만 보고 "먹음직스럽네요" 하면 안 됩니다.)
-3. **시간 정보 무시**: "15시간 전" 등은 무조건 작성 시각입니다. 내용과 절대 엮지 마세요.
-4. **인간적인 짧은 소통**: 따뜻한 인사를 포함하여 한두 문장으로 자연스럽게 작성하세요.
-5. 오직 실제로 게시할 댓글 본문만 출력하세요.`;
-
-                            const rawAi = await generateReplyFn(prompt, aiImages);
-                            const finalComment = rawAi.trim().split(/\n+/).pop()?.trim() || rawAi;
-
-                            const box = newPage.locator('.u_cbox_write_area .u_cbox_text');
-                            if (await box.isVisible()) {
-                                await box.fill(finalComment);
-                                await newPage.waitForTimeout(500);
-                                await newPage.locator('.u_cbox_btn_upload').first().click();
-                                await newPage.waitForTimeout(3000);
-                                console.log(`[Visit] 맞춤형 댓글 작성 완료: ${finalComment}`);
-                            }
-                        } else {
-                            console.log(`[Visit] 이미 내 댓글이 존재합니다.`);
-                        }
-                        // 어떤 경우든(작성했든, 이미 존재하여 스킵했든) 이 블로그 ID는 이번 세션에서 중복 방문하지 않도록 추가
-                        this.visitedNeighbors.add(info.blogId);
-                    }
-                    await newPage.close().catch(() => { });
-                    if (this.page && !this.page.isClosed()) {
-                        await this.page.bringToFront();
-                        await this.page.waitForTimeout(2000);
+                    
+                    // 작성창이 닫히거나 상태가 초기화될 시간을 좀 더 여유있게 확보
+                    await this.page.waitForTimeout(2000);
+                    
+                    const href = await el.locator('.u_cbox_name').first().getAttribute('href').catch(() => null);
+                    const blogIdMatch = href?.match(/blogId=([^&]+)/);
+                    if (blogIdMatch) {
+                        neighborsToVisit.add(blogIdMatch[1]);
                     }
                 }
             } catch (e: any) {
-                console.error(`[Bot] 댓글 작성 중 오류 발생: ${e.message}`);
-                // 전체 브라우저가 종료되거나 메인 페이지가 닫혔다면 루프 종료
+                console.error(`[Bot] 대댓글 작성 중 오류 발생: ${e.message}`);
                 if (e.message.includes('Target closed') || !this.page || this.page.isClosed()) {
                     break;
                 }
+            }
+        }
+
+        // --- 이웃 블로그 방문 페이즈 ---
+        for (const neighborBlogId of neighborsToVisit) {
+            if (this.visitedNeighbors.has(neighborBlogId)) continue;
+            let newPage;
+            try {
+                if (!this.page || this.page.isClosed()) break;
+                console.log(`[Visit] ${neighborBlogId}님의 블로그를 방문합니다...`);
+                newPage = await this.context!.newPage();
+                await newPage.goto(`https://m.blog.naver.com/${neighborBlogId}`, { waitUntil: "networkidle" }).catch(()=>{});
+                await newPage.waitForTimeout(1000);
+
+                const info = await newPage.evaluate(() => {
+                    const errorMsg = document.body.innerText;
+                    const isBlocked = errorMsg.includes('접근 불가') || errorMsg.includes('삭제되었습니다') || errorMsg.includes('제한된');
+                    if (isBlocked) return { isBlocked: true };
+
+                    const links = Array.from(document.querySelectorAll('a')).map(l => {
+                        const m = l.href.match(/logNo=(\d+)/) || l.href.match(/\/(\d+)\??/);
+                        let isPop = false; let c: HTMLElement | null = l; while (c && c !== document.body) { if (c.className?.includes('popular') || c.id?.includes('popular')) { isPop = true; break; } c = c.parentElement; }
+                        return { href: l.href, logNo: m ? parseInt(m[1]) : null, isPop, title: l.textContent?.trim() || "" };
+                    }).filter(c => c.logNo);
+                    const target = links.filter(c => !c.isPop).sort((a, b) => (b.logNo || 0) - (a.logNo || 0))[0] || links.sort((a, b) => (b.logNo || 0) - (a.logNo || 0))[0];
+                    const bId = new URLSearchParams(window.location.search).get('blogId') || window.location.pathname.split('/')[1];
+                    return { blogId: bId, logNo: target?.logNo, title: target?.title.replace(/사진\s*개수\s*\d+/g, "").trim() || "최신 포스트", isBlocked: false };
+                });
+
+                if (info.isBlocked) {
+                    console.log(`[Visit] ${neighborBlogId}님의 블로그는 접근 불가 상태입니다.`);
+                    await newPage.close().catch(() => { });
+                    continue;
+                }
+                
+                if (info.logNo && info.blogId) {
+                    console.log(`[Visit] ${info.blogId}님의 최신글("${info.title}")을 읽는 중...`);
+                    const postViewUrl = `https://m.blog.naver.com/${info.blogId}/${info.logNo}`;
+                    await newPage.goto(postViewUrl, { waitUntil: "networkidle" });
+                    await newPage.waitForTimeout(1500);
+
+                    const postContent = await newPage.evaluate(() => {
+                        const contentEl = document.querySelector('.se-main-container, .post_article, .se-viewer, #post-view');
+                        if (!contentEl) return { body: "", imageUrls: [] };
+                        const body = contentEl.textContent?.trim().replace(/\s+/g, " ").slice(0, 1000) || "";
+                        const imgs = Array.from(contentEl.querySelectorAll('img'))
+                            .map(img => img.src || img.getAttribute('data-lazy-src'))
+                            .filter(src => src && src.startsWith('http') && !src.includes('static.naver.net'))
+                            .slice(0, 2);
+                        return { body, imageUrls: imgs };
+                    });
+
+                    const aiImages: any[] = [];
+                    for (const imgUrl of postContent.imageUrls) {
+                        try {
+                            const response = await fetch(imgUrl!);
+                            const buffer = await response.arrayBuffer();
+                            const base64 = Buffer.from(buffer).toString('base64');
+                            const mimeType = response.headers.get('content-type') || 'image/jpeg';
+                            aiImages.push({ inlineData: { data: base64, mimeType } });
+                        } catch (e) {
+                            console.error(`[Visit] 이미지 로드 실패: ${imgUrl}`, e);
+                        }
+                    }
+
+                    const response = await newPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${info.blogId}&logNo=${info.logNo}`, { waitUntil: "networkidle" });
+                    if (!response || !response.ok()) {
+                        console.log(`[Visit] 댓글 페이지 이동 실패.`);
+                        await newPage.close().catch(() => { });
+                        continue;
+                    }
+                    await newPage.waitForSelector('.u_cbox_list', { timeout: 3000 }).catch(() => { });
+
+                    const already = await newPage.evaluate(() => {
+                        const myNickEl = document.querySelector('.u_cbox_write_area .u_cbox_nick, .u_header_user_name, .gnb_my_name');
+                        const myNick = myNickEl?.textContent?.trim() || "";
+                        if (!myNick) return false;
+                        const commentNicks = Array.from(document.querySelectorAll('.u_cbox_nick:not(.u_cbox_write_area .u_cbox_nick)'));
+                        return commentNicks.some(n => {
+                            const text = n.textContent?.trim() || "";
+                            return text === myNick || (myNick.length > 1 && text.includes(myNick));
+                        });
+                    });
+
+                    if (!already) {
+                        const prompt = `역할: 블로그 방문객 (다정한 이웃)\n상황: 이웃의 블로그 포스트("${info.title}")를 읽고 댓글을 남기려 합니다.\n\n[포스트 정보]\n제목: "${info.title}"\n본문 내용: "${postContent.body || "텍스트 내용이 적거나 사진 위주의 포스트입니다."}"\n\n[작성 규칙 - 필독]\n1. **텍스트 우선 분석**: 본문에 "아스파라거스의 효능", "정보 공유" 등 읽을만한 구체적인 내용이 있다면 사진은 무시하고 **본문 내용에 대해서만** 정중하게 댓글을 쓰세요.\n2. **사진은 플랜B**: 본문 내용이 거의 없거나 "오늘의 일상"처럼 단순할 때만 사진 분석 정보를 참고하여 "사진 속 ~가 멋지네요" 등을 언급하세요. (아무 내용이 없는데 사진만 보고 "먹음직스럽네요" 하면 안 됩니다.)\n3. **시간 정보 무시**: "15시간 전" 등은 무조건 작성 시각입니다. 내용과 절대 엮지 마세요.\n4. **인간적인 짧은 소통**: 따뜻한 인사를 포함하여 한두 문장으로 자연스럽게 작성하세요.\n5. 오직 실제로 게시할 댓글 본문만 출력하세요.`;
+                        const rawAi = await generateReplyFn(prompt, aiImages);
+                        const finalComment = rawAi.trim().split(/\n+/).pop()?.trim() || rawAi;
+
+                        const box = newPage.locator('.u_cbox_write_area .u_cbox_text');
+                        if (await box.isVisible()) {
+                            await box.fill(finalComment);
+                            await newPage.waitForTimeout(500);
+                            await newPage.locator('.u_cbox_btn_upload').first().click();
+                            await newPage.waitForTimeout(2000);
+                            console.log(`[Visit] 맞춤형 댓글 작성 완료: ${finalComment}`);
+                        }
+                    } else {
+                        console.log(`[Visit] 이미 내 댓글이 존재합니다.`);
+                    }
+                    this.visitedNeighbors.add(info.blogId);
+                }
+                await newPage.close().catch(() => { });
+                if (this.page && !this.page.isClosed()) {
+                    await this.page.bringToFront();
+                    await this.page.waitForTimeout(1000);
+                }
+            } catch (e: any) {
+                console.error(`[Visit] 이웃 방문 중 오류: ${e.message}`);
+                await newPage?.close().catch(()=>{});
             }
         }
         return repliesMade;
