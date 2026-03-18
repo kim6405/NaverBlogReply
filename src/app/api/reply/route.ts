@@ -21,26 +21,34 @@ export async function POST(request: Request) {
   const bot = new NaverBlogBot();
   let totalReplyCount = 0;
 
-  try {
-    await bot.init();
-    await bot.ensureLogin(blogId); 
-    
-    for (const post of postsWithComments) {
-      console.log(`Processing post: ${post.title}`);
+    try {
+      await bot.init();
+      await bot.ensureLogin(blogId); 
       
-      const count = await bot.writeRepliesForPost(post.url, async (commentText, images) => {
+      // 1. [신규] 이웃블로그 새글 탐색 및 댓글 작성 진행
+      console.log("Starting neighbor feed check...");
+      const feedReplyCount = await bot.processNeighborFeed(async (commentText, images) => {
         return await generateReply(commentText, images);
       });
-      
-      totalReplyCount += count;
+      totalReplyCount += feedReplyCount;
 
-      await prisma.post.update({
-        where: { id: post.id },
-        data: { commentCount: 0 }
-      });
-    }
+      // 2. [기존] 내 블로그 대댓글 처리 & 해당 작성자의 최신 글 답방
+      for (const post of postsWithComments) {
+        console.log(`Processing post: ${post.title}`);
+        
+        const count = await bot.writeRepliesForPost(post.url, async (commentText, images) => {
+          return await generateReply(commentText, images);
+        });
+        
+        totalReplyCount += count;
 
-    // 통계 업데이트
+        await prisma.post.update({
+          where: { id: post.id },
+          data: { commentCount: 0 }
+        });
+      }
+
+      // 통계 업데이트
     await prisma.dashboardStats.upsert({
       where: { blogId: blogId },
       update: { 

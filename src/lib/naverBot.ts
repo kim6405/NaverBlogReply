@@ -1,5 +1,6 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
 import path from "path";
+import { prisma } from "./prisma";
 
 /**
  * 네이버 블로그 댓글 크롤러 및 작성 봇 클래스
@@ -183,6 +184,199 @@ export class NaverBlogBot {
         return finalResults;
     }
 
+    /**
+     * 이웃 새글 피드 탐색 및 댓글 작성
+     */
+    async processNeighborFeed(generateReplyFn: (comment: string, images?: any[]) => Promise<string>): Promise<number> {
+        if (!this.page) throw new Error("Bot not initialized");
+        
+        console.log("[Bot] 이웃 새글 피드를 탐색합니다...");
+        let repliesMade = 0;
+
+        try {
+            // 이웃 새글 피드(모바일)로 이동 - groupId=1 파라미터를 붙여 추천글을 최소화합니다.
+            await this.page.goto("https://m.blog.naver.com/FeedList.naver?groupId=1", { waitUntil: "networkidle" });
+            await this.page.waitForTimeout(2000);
+            
+            // 스크롤 내려서 피드 항목 확보
+            for (let i = 0; i < 3; i++) {
+                await this.page.evaluate(() => window.scrollBy(0, 1500));
+                await this.page.waitForTimeout(1000);
+            }
+
+            // 피드에서 포스트 링크들 추출
+            const feedPosts = await this.page.evaluate(() => {
+                const containers = Array.from(document.querySelectorAll('.card_item, .feed_card_item, li[class*="item"], div[class*="item"]'));
+                const results: { url: string, blogId: string, logNo: string, title: string }[] = [];
+                const seenLogNos = new Set();
+                
+                containers.forEach(container => {
+                    const linkEl = container.querySelector('a');
+                    if (!linkEl) return;
+                    const href = linkEl.href;
+                    
+                    // 링크 파싱: m.blog.naver.com/blogId/logNo 형태 등 추출
+                    const blogIdMatch = href.match(/blogId=([^&]+)/) || href.match(/m\.blog\.naver\.com\/([^\/]+)\/(\d+)/);
+                    if (!blogIdMatch) return;
+                    
+                    const logNoMatch = href.match(/logNo=(\d+)/) || href.match(/\/(\d+)\??/);
+                    if (!logNoMatch) return;
+
+                    const blogId = blogIdMatch[1];
+                    const logNo = logNoMatch[logNoMatch.length - 1]; // /blogId/logNo 형태에서는 그룹 2
+                    
+                    if (blogId === 'FeedList.naver' || blogId === 'CommentList.naver') return;
+
+                    const key = `${blogId}_${logNo}`;
+                    if (seenLogNos.has(key)) return;
+                    
+                    // 추천글/광고 감별
+                    // 1. 이웃추가 버튼이 있으면 추천글이다 (이미 이웃이면 버튼이 없음)
+                    const hasFollowBtn = !!container.querySelector('[class*="add_btn"], [class*="follow_btn"]');
+                    
+                    // 2. '추천글' 텍스트 포함 여부 (프로필 영역 등)
+                    const innerText = container.textContent || "";
+                    const isRecommendText = innerText.includes('추천글') || innerText.includes('추천 블로그') || innerText.includes('광고');
+                    
+                    // 3. 기존의 추천 관련 클래스/아이디 (혹시 모르니 유지)
+                    const isRecommendMark = !!container.querySelector('[class*="recommend"], [id*="recommend"], .spcb, .spc_txt, .text_ad');
+                    
+                    const isPopular = hasFollowBtn || isRecommendText || isRecommendMark;
+                    
+                    if (!isPopular) {
+                        seenLogNos.add(key);
+                        const titleEl = container.querySelector('strong, h3, [class*="title"], .title');
+                        const title = titleEl ? titleEl.textContent?.trim() || "제목 없음" : "제목 없음";
+
+                        results.push({ url: href, blogId, logNo, title });
+                    }
+                });
+                return results;
+            });
+
+            console.log(`[Bot] 이웃 새글 피드에서 ${feedPosts.length}개의 포스트를 발견했습니다.`);
+
+            for (const post of feedPosts) {
+                // 내 방문 이력 조회
+                const history = await prisma.visitHistory.findUnique({
+                    where: {
+                        blogId_postId: { blogId: post.blogId, postId: post.logNo }
+                    }
+                });
+
+                if (history) {
+                    console.log(`[Bot] 스킵: 이미 답방한 포스트 - ${post.blogId}의 ${post.logNo}`);
+                    continue; // 이미 방문/댓글 작성함
+                }
+
+                // 방문 및 댓글 작성
+                let newPage;
+                try {
+                    console.log(`[Visit-Feed] ${post.blogId}님의 새글("${post.title}")을 읽는 중...`);
+                    newPage = await this.context!.newPage();
+                    const postViewUrl = `https://m.blog.naver.com/${post.blogId}/${post.logNo}`;
+                    await newPage.goto(postViewUrl, { waitUntil: "networkidle" });
+                    await newPage.waitForTimeout(1500);
+
+                    const postContent = await newPage.evaluate(() => {
+                        const contentEl = document.querySelector('.se-main-container, .post_article, .se-viewer, #post-view');
+                        if (!contentEl) return { body: "", imageUrls: [] };
+                        const body = contentEl.textContent?.trim().replace(/\s+/g, " ").slice(0, 1000) || "";
+                        const imgs = Array.from(contentEl.querySelectorAll('img'))
+                            .map(img => img.src || img.getAttribute('data-lazy-src'))
+                            .filter(src => src && src.startsWith('http') && !src.includes('static.naver.net'))
+                            .slice(0, 2);
+                        return { body, imageUrls: imgs };
+                    });
+
+                    const aiImages: any[] = [];
+                    for (const imgUrl of postContent.imageUrls) {
+                        try {
+                            const response = await fetch(imgUrl!);
+                            const buffer = await response.arrayBuffer();
+                            const base64 = Buffer.from(buffer).toString('base64');
+                            const mimeType = response.headers.get('content-type') || 'image/jpeg';
+                            aiImages.push({ inlineData: { data: base64, mimeType } });
+                        } catch (e) { }
+                    }
+
+                    const response = await newPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${post.blogId}&logNo=${post.logNo}`, { waitUntil: "networkidle" });
+                    if (!response || !response.ok()) {
+                        await newPage.close().catch(() => { });
+                        continue;
+                    }
+                    await newPage.waitForSelector('.u_cbox_list', { timeout: 3000 }).catch(() => { });
+
+                    const already = await newPage.evaluate(() => {
+                        const myNickEl = document.querySelector('.u_cbox_write_area .u_cbox_nick, .u_header_user_name, .gnb_my_name');
+                        const myNick = myNickEl?.textContent?.trim() || "";
+                        if (!myNick) return false;
+                        const commentNicks = Array.from(document.querySelectorAll('.u_cbox_nick:not(.u_cbox_write_area .u_cbox_nick)'));
+                        return commentNicks.some(n => {
+                            const text = n.textContent?.trim() || "";
+                            return text === myNick || (myNick.length > 1 && text.includes(myNick));
+                        });
+                    });
+
+                    if (!already) {
+                        const prompt = `역할: 블로그 이웃 (다정한 소통)\n상황: 이웃의 블로그 새글("${post.title}")을 읽고 정성스러운 댓글을 남기려 합니다.\n\n[포스트 정보]\n제목: "${post.title}"\n본문 내용: "${postContent.body || "텍스트 내용이 적거나 사진 위주의 포스트입니다."}"\n\n[작성 규칙 - 필독]\n1. **텍스트 분석이 최우선**: 본문에 구체적인 정보/경험담이 있다면 무조건 **본문을 기반으로** 공감하고 칭찬하세요.\n2. **사진은 보조 수단**: 글이 거의 빈약할 때만 사진 정보를 언급하세요.\n3. **자연스러운 대화**: 봇 느낌을 피하고 이웃 사이의 편안하고 따뜻한 어투(해요체)로 1~2문장만 쓰세요. "잘 보고 갑니다" 등 성의없는 말 금지.\n5. 댓글 내용만 출력하세요.`;
+                        const rawAi = await generateReplyFn(prompt, aiImages);
+                        const finalComment = rawAi.trim().split(/\n+/).pop()?.trim() || rawAi;
+
+                        const box = newPage.locator('.u_cbox_write_area .u_cbox_text');
+                        if (await box.isVisible()) {
+                            // 혹시 이전 내용이 남아있다면 지우기
+                            await box.click();
+                            await newPage.keyboard.down('Control');
+                            await newPage.keyboard.press('A');
+                            await newPage.keyboard.up('Control');
+                            await newPage.keyboard.press('Backspace');
+                            
+                            await box.fill(finalComment);
+                            await newPage.waitForTimeout(500);
+                            await newPage.locator('.u_cbox_btn_upload').first().click();
+                            await newPage.waitForTimeout(2000);
+                            console.log(`[Visit-Feed] 맞춤형 댓글 작성 완료: ${finalComment}`);
+                            repliesMade++;
+                            
+                            // History DB에 저장
+                            try {
+                                await prisma.visitHistory.upsert({
+                                    where: { blogId_postId: { blogId: post.blogId, postId: post.logNo } },
+                                    update: {},
+                                    create: { blogId: post.blogId, postId: post.logNo }
+                                });
+                            } catch (error) {
+                                console.error(`[Bot] DB 저장 실패: ${error}`);
+                            }
+                        }
+                    } else {
+                        console.log(`[Visit-Feed] 이미 내 댓글이 존재합니다. (DB 미저장 상태였음, 지금 저장)`);
+                        try {
+                            await prisma.visitHistory.upsert({
+                                where: { blogId_postId: { blogId: post.blogId, postId: post.logNo } },
+                                update: {},
+                                create: { blogId: post.blogId, postId: post.logNo }
+                            });
+                        } catch(e) {}
+                    }
+                } catch (e: any) {
+                    console.error(`[Visit-Feed] 새글 답방 중 오류: ${e.message}`);
+                } finally {
+                    await newPage?.close().catch(()=>{});
+                    if (this.page && !this.page.isClosed()) {
+                        await this.page.bringToFront();
+                    }
+                }
+            }
+        } catch (e: any) {
+            console.error(`[Bot] 이웃 새글 피드 탐색 중 오류 발생: ${e.message}`);
+        }
+        
+        console.log(`[Bot] 이웃 새글 탐색 완료. 총 ${repliesMade}건 답방 작성.`);
+        return repliesMade;
+    }
+
     async writeRepliesForPost(url: string, generateReplyFn: (comment: string, images?: any[]) => Promise<string>): Promise<number> {
         if (!this.page) throw new Error("Bot not initialized");
         const blogIdMatch = url.match(/blogId=([^&]+)/);
@@ -325,6 +519,16 @@ export class NaverBlogBot {
                 }
                 
                 if (info.logNo && info.blogId) {
+                    // History DB 체크
+                    const history = await prisma.visitHistory.findUnique({
+                        where: { blogId_postId: { blogId: info.blogId, postId: info.logNo.toString() } }
+                    });
+                    if (history) {
+                        console.log(`[Visit] 스킵: 이미 방문한 최신글 - ${info.blogId}의 ${info.logNo}`);
+                        await newPage.close().catch(() => { });
+                        continue;
+                    }
+
                     console.log(`[Visit] ${info.blogId}님의 최신글("${info.title}")을 읽는 중...`);
                     const postViewUrl = `https://m.blog.naver.com/${info.blogId}/${info.logNo}`;
                     await newPage.goto(postViewUrl, { waitUntil: "networkidle" });
@@ -380,14 +584,38 @@ export class NaverBlogBot {
 
                         const box = newPage.locator('.u_cbox_write_area .u_cbox_text');
                         if (await box.isVisible()) {
+                            // 입력 전 내용 클리어
+                            await box.click();
+                            await newPage.keyboard.down('Control');
+                            await newPage.keyboard.press('A');
+                            await newPage.keyboard.up('Control');
+                            await newPage.keyboard.press('Backspace');
+                            
                             await box.fill(finalComment);
                             await newPage.waitForTimeout(500);
                             await newPage.locator('.u_cbox_btn_upload').first().click();
                             await newPage.waitForTimeout(2000);
                             console.log(`[Visit] 맞춤형 댓글 작성 완료: ${finalComment}`);
+                            
+                            // History DB 저장
+                            try {
+                                await prisma.visitHistory.upsert({
+                                    where: { blogId_postId: { blogId: info.blogId, postId: info.logNo.toString() } },
+                                    update: {},
+                                    create: { blogId: info.blogId, postId: info.logNo.toString() }
+                                });
+                            } catch (error) {}
                         }
                     } else {
                         console.log(`[Visit] 이미 내 댓글이 존재합니다.`);
+                        // 내 댓글이 이미 있으면(수동으로 적었든 에러로 누락됐든) 기록해둠
+                        try {
+                            await prisma.visitHistory.upsert({
+                                where: { blogId_postId: { blogId: info.blogId!, postId: info.logNo!.toString() } },
+                                update: {},
+                                create: { blogId: info.blogId!, postId: info.logNo!.toString() }
+                            });
+                        } catch(e) {}
                     }
                     this.visitedNeighbors.add(info.blogId);
                 }

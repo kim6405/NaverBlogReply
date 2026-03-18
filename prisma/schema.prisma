@@ -48,4 +48,13 @@ model DashboardStats {
   lastCrawlTime  DateTime @default(now())
 }
 
+model VisitHistory {
+  id        String   @id @default(cuid())
+  blogId    String   // 이웃 블로그 아이디
+  postId    String   // 포스트 번호(logNo)
+  visitedAt DateTime @default(now())
+  
+  @@unique([blogId, postId])
+}
+
 

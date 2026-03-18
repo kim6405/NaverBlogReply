@@ -46,18 +46,14 @@ export default function DashboardClient({
   }, [initialStats, canWriteReplies]);
 
   const handleAutoReply = async () => {
-    if (!canWriteReplies) {
-      alert("전체 새로고침(스캔)을 먼저 완료해주세요.");
-      return;
-    }
-    const postsToReply = initialPosts.filter(p => p.comments > 0);
-    if (postsToReply.length === 0) {
-      alert("대기 중인 댓글이 있는 포스트가 없습니다.");
+    // 이제 스캔(canWriteReplies)과 무관하게 이웃 새글 탐색이 가능해야 하므로 조건 완화
+    if (!blogId.trim()) {
+      alert("네이버 블로그 아이디를 먼저 입력해주세요.");
       return;
     }
 
     setIsRefreshing(true);
-    setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type: 'scan', msg: 'AI 대댓글 일괄 생성 및 작성 시작...' }]);
+    setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type: 'scan', msg: '이웃 새글 탐색 및 AI 대댓글 일괄 생성 시작...' }]);
 
     try {
       const res = await fetch(`/api/reply?blogId=${encodeURIComponent(blogId.trim())}`, { method: 'POST' });
@@ -159,13 +155,13 @@ export default function DashboardClient({
             <div className="flex items-center gap-3">
               <button
                 onClick={handleAutoReply}
-                disabled={isRefreshing || !canWriteReplies}
-                className={`px-6 py-2.5 font-bold rounded-2xl transition-all active:scale-95 shadow-lg whitespace-nowrap ${isRefreshing || !canWriteReplies
+                disabled={isRefreshing}
+                className={`px-6 py-2.5 font-bold rounded-2xl transition-all active:scale-95 shadow-lg whitespace-nowrap ${isRefreshing
                     ? 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-50'
                     : 'bg-green-500 text-slate-950 hover:bg-green-400 hover:shadow-green-500/30'
                   }`}
               >
-                {isRefreshing ? (canWriteReplies ? '작성 중...' : '스캔 중...') : 'AI 대댓글 일괄 작성'}
+                {isRefreshing ? '작성 중...' : 'AI 댓글 일괄 작성'}
               </button>
               <button
                 onClick={handleRefresh}
