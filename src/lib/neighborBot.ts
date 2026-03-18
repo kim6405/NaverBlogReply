@@ -16,6 +16,111 @@ export class NeighborBot {
     }
 
     /**
+     * 댓글 입력 영역에 텍스트를 입력하는 헬퍼 메서드.
+     * textarea(fill) → contenteditable(innerText) → keyboard.type() 순으로 시도합니다.
+     */
+    private async typeComment(targetPage: Page, comment: string): Promise<boolean> {
+        // 셀렉터 목록 (댓글 입력 가능한 요소들)
+        const selectors = [
+            'textarea.u_cbox_text',
+            '.u_cbox_write_area .u_cbox_text',
+            '#u_cbox_contents',
+            '.u_cbox_write_area textarea',
+            '[contenteditable="true"].u_cbox_text',
+            '.u_cbox_inbox [contenteditable="true"]',
+        ];
+
+        // --- 1단계: Playwright fill() 시도 (textarea 전용) ---
+        for (const sel of selectors) {
+            const loc = targetPage.locator(sel).locator('visible=true').first();
+            if (await loc.count() > 0) {
+                try {
+                    await loc.click({ timeout: 3000 });
+                    await targetPage.waitForTimeout(300);
+                    await loc.fill(comment);
+                    await targetPage.waitForTimeout(500);
+
+                    // 입력 검증
+                    const value = await loc.evaluate((el: any) =>
+                        el.value || el.innerText || el.textContent || ''
+                    );
+                    if (value.trim().length > 0) {
+                        console.log(`[typeComment] fill() 성공 (selector: ${sel})`);
+                        return true;
+                    }
+                } catch (e) {
+                    // fill() 실패 시 다음 전략으로
+                }
+            }
+        }
+
+        // --- 2단계: contenteditable 등 비표준 요소에 직접 삽입 ---
+        for (const sel of selectors) {
+            const loc = targetPage.locator(sel).locator('visible=true').first();
+            if (await loc.count() > 0) {
+                try {
+                    await loc.click({ force: true, timeout: 3000 });
+                    await targetPage.waitForTimeout(300);
+
+                    await loc.evaluate((el: any, val: string) => {
+                        el.focus();
+                        // textarea인 경우
+                        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                            el.value = val;
+                        } else {
+                            // contenteditable인 경우
+                            el.innerText = val;
+                        }
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        // React 등의 프레임워크용 이벤트도 dispatch
+                        el.dispatchEvent(new Event('keyup', { bubbles: true }));
+                    }, comment);
+
+                    // 키보드 이벤트 트리거 (네이버 댓글 시스템 활성화용)
+                    await targetPage.keyboard.type(' ');
+                    await targetPage.keyboard.press('Backspace');
+                    await targetPage.waitForTimeout(500);
+
+                    const value = await loc.evaluate((el: any) =>
+                        el.value || el.innerText || el.textContent || ''
+                    );
+                    if (value.trim().length > 0) {
+                        console.log(`[typeComment] evaluate 삽입 성공 (selector: ${sel})`);
+                        return true;
+                    }
+                } catch (e) {
+                    // 실패 시 다음으로
+                }
+            }
+        }
+
+        // --- 3단계: 아무 활성 요소에나 키보드로 직접 타이핑 ---
+        try {
+            const anyBox = targetPage.locator('.u_cbox_write_area').locator('visible=true').first();
+            if (await anyBox.count() > 0) {
+                await anyBox.click({ force: true });
+                await targetPage.waitForTimeout(500);
+                // 기존 내용 전체 선택 후 삭제
+                await targetPage.keyboard.down('Control');
+                await targetPage.keyboard.press('A');
+                await targetPage.keyboard.up('Control');
+                await targetPage.keyboard.press('Backspace');
+                await targetPage.waitForTimeout(200);
+                // 직접 키보드 입력
+                await targetPage.keyboard.type(comment, { delay: 30 });
+                await targetPage.waitForTimeout(500);
+                console.log(`[typeComment] keyboard.type() 직접 입력 시도 완료`);
+                return true;
+            }
+        } catch (e) {
+            console.error(`[typeComment] 모든 입력 방법 실패`);
+        }
+
+        return false;
+    }
+
+    /**
      * 이웃 새글 피드 탐색 및 댓글 작성
      */
     async processNeighborFeed(generateReplyFn: (comment: string, images?: any[]) => Promise<string>): Promise<number> {
@@ -125,30 +230,26 @@ export class NeighborBot {
 
                         console.log(`[Visit-Feed] 댓글 작성 시도: ${post.blogId}`);
                         await newPage.bringToFront();
-                        const box = newPage.locator('textarea.u_cbox_text, .u_cbox_write_area .u_cbox_text, #u_cbox_contents').locator('visible=true').first();
                         
                         try {
-                            await box.click({ force: true, delay: 500 }).catch(() => {});
-                            await newPage.waitForTimeout(500);
-                            await box.evaluate((el: any, val) => {
-                                el.focus(); el.value = val;
-                                el.dispatchEvent(new Event('input', { bubbles: true }));
-                                el.dispatchEvent(new Event('change', { bubbles: true }));
-                            }, finalComment);
-                            await newPage.keyboard.type(" ");
-                            await newPage.keyboard.press("Backspace");
-                            
-                            const uploadBtn = newPage.locator('.u_cbox_btn_upload').locator('visible=true').first();
-                            if (await uploadBtn.count() > 0) {
-                                await uploadBtn.click({ force: true });
-                                await newPage.waitForTimeout(3000);
-                                console.log(`[Visit-Feed] 댓글 작성 완료: ${finalComment}`);
-                                repliesMade++;
-                                await prisma.visitHistory.upsert({
-                                    where: { blogId_postId: { blogId: post.blogId, postId: post.logNo } },
-                                    update: {},
-                                    create: { blogId: post.blogId, postId: post.logNo }
-                                });
+                            const inputted = await this.typeComment(newPage, finalComment);
+                            if (inputted) {
+                                const uploadBtn = newPage.locator('.u_cbox_btn_upload').locator('visible=true').first();
+                                if (await uploadBtn.count() > 0) {
+                                    await uploadBtn.click({ force: true });
+                                    await newPage.waitForTimeout(3000);
+                                    console.log(`[Visit-Feed] 댓글 작성 완료: ${finalComment}`);
+                                    repliesMade++;
+                                    await prisma.visitHistory.upsert({
+                                        where: { blogId_postId: { blogId: post.blogId, postId: post.logNo } },
+                                        update: {},
+                                        create: { blogId: post.blogId, postId: post.logNo }
+                                    });
+                                } else {
+                                    console.log(`[Visit-Feed] 등록 버튼을 찾을 수 없습니다.`);
+                                }
+                            } else {
+                                console.log(`[Visit-Feed] 댓글 입력에 실패했습니다.`);
                             }
                         } catch (err: any) { console.error(`[Visit-Feed] 입력 중 오류: ${err.message}`); }
                     } else {
@@ -299,36 +400,28 @@ export class NeighborBot {
                         console.log(`[Visit] ${info.blogId} 댓글 작성 시도...`);
                         await newPage.bringToFront();
                         
-                        const box = newPage.locator('textarea.u_cbox_text, .u_cbox_write_area .u_cbox_text, #u_cbox_contents').locator('visible=true').first();
-                        
                         try {
-                            await box.click({ force: true, delay: 500 }).catch(() => {});
-                            await newPage.waitForTimeout(500);
-                            
-                            await box.evaluate((el: any, val) => {
-                                el.focus(); el.value = val;
-                                el.dispatchEvent(new Event('input', { bubbles: true }));
-                                el.dispatchEvent(new Event('change', { bubbles: true }));
-                            }, finalComment);
-                            
-                            await newPage.keyboard.type(" ");
-                            await newPage.keyboard.press("Backspace");
-                            await newPage.waitForTimeout(1000);
-                            
-                            const uploadBtn = newPage.locator('.u_cbox_btn_upload').locator('visible=true').first();
-                            if (await uploadBtn.count() > 0) {
-                                await uploadBtn.click({ force: true });
-                                await newPage.waitForTimeout(3000);
-                                console.log(`[Visit] 맞춤형 댓글 작성 완료: ${finalComment}`);
-                                repliesMade++;
-                                
-                                try {
-                                    await prisma.visitHistory.upsert({
-                                        where: { blogId_postId: { blogId: info.blogId, postId: info.logNo.toString() } },
-                                        update: {},
-                                        create: { blogId: info.blogId, postId: info.logNo.toString() }
-                                    });
-                                } catch (error) {}
+                            const inputted = await this.typeComment(newPage, finalComment);
+                            if (inputted) {
+                                const uploadBtn = newPage.locator('.u_cbox_btn_upload').locator('visible=true').first();
+                                if (await uploadBtn.count() > 0) {
+                                    await uploadBtn.click({ force: true });
+                                    await newPage.waitForTimeout(3000);
+                                    console.log(`[Visit] 맞춤형 댓글 작성 완료: ${finalComment}`);
+                                    repliesMade++;
+                                    
+                                    try {
+                                        await prisma.visitHistory.upsert({
+                                            where: { blogId_postId: { blogId: info.blogId, postId: info.logNo.toString() } },
+                                            update: {},
+                                            create: { blogId: info.blogId, postId: info.logNo.toString() }
+                                        });
+                                    } catch (error) {}
+                                } else {
+                                    console.log(`[Visit] 등록 버튼을 찾을 수 없습니다.`);
+                                }
+                            } else {
+                                console.log(`[Visit] 댓글 입력에 실패했습니다.`);
                             }
                         } catch (e: any) {
                             console.error(`[Visit] 댓글 입력 시도 중 오류: ${e.message}`);
