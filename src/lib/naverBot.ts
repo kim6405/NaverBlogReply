@@ -439,9 +439,17 @@ export class NaverBlogBot {
                     await this.page.waitForTimeout(2000);
                     
                     const href = await el.locator('.u_cbox_name').first().getAttribute('href').catch(() => null);
-                    const blogIdMatch = href?.match(/blogId=([^&]+)/);
-                    if (blogIdMatch) {
-                        neighborsToVisit.add(blogIdMatch[1]);
+                    let nBlogId = null;
+                    if (href) {
+                        const m1 = href.match(/blogId=([^&]+)/);
+                        if (m1 && m1[1]) nBlogId = m1[1];
+                        else {
+                            const m2 = href.match(/m\.blog\.naver\.com\/([^\/?#]+)/);
+                            if (m2 && m2[1]) nBlogId = m2[1];
+                        }
+                    }
+                    if (nBlogId && !['CommentList.naver', 'FeedList.naver', 'PostList.naver', 'MyBlog.naver'].includes(nBlogId)) {
+                        neighborsToVisit.add(nBlogId);
                     }
                 }
             } catch (e: any) {
@@ -460,23 +468,49 @@ export class NaverBlogBot {
                 if (!this.page || this.page.isClosed()) break;
                 console.log(`[Visit] ${neighborBlogId}님의 블로그를 방문합니다...`);
                 newPage = await this.context!.newPage();
-                await newPage.goto(`https://m.blog.naver.com/${neighborBlogId}`, { waitUntil: "networkidle" }).catch(()=>{});
+                await newPage.goto(`https://m.blog.naver.com/${neighborBlogId}?listStyle=card`, { waitUntil: "networkidle" }).catch(()=>{});
+                await newPage.waitForTimeout(2000);
+                
+                // 스크롤 약간 내리기
+                await newPage.evaluate(() => window.scrollBy(0, 500));
                 await newPage.waitForTimeout(1000);
 
-                const info = await newPage.evaluate(() => {
+                const info = await newPage.evaluate((nId) => {
                     const errorMsg = document.body.innerText;
-                    const isBlocked = errorMsg.includes('접근 불가') || errorMsg.includes('삭제되었습니다') || errorMsg.includes('제한된');
-                    if (isBlocked) return { isBlocked: true };
+                    const isBlocked = errorMsg.includes('접근 불가') || errorMsg.includes('삭제되었습니다') || errorMsg.includes('제한된') || errorMsg.includes('유효하지 않은');
+                    if (isBlocked) return { isBlocked: true, blogId: nId };
 
-                    const links = Array.from(document.querySelectorAll('a')).map(l => {
-                        const m = l.href.match(/logNo=(\d+)/) || l.href.match(/\/(\d+)\??/);
-                        let isPop = false; let c: HTMLElement | null = l; while (c && c !== document.body) { if (c.className?.includes('popular') || c.id?.includes('popular')) { isPop = true; break; } c = c.parentElement; }
-                        return { href: l.href, logNo: m ? parseInt(m[1]) : null, isPop, title: l.textContent?.trim() || "" };
-                    }).filter(c => c.logNo);
-                    const target = links.filter(c => !c.isPop).sort((a, b) => (b.logNo || 0) - (a.logNo || 0))[0] || links.sort((a, b) => (b.logNo || 0) - (a.logNo || 0))[0];
-                    const bId = new URLSearchParams(window.location.search).get('blogId') || window.location.pathname.split('/')[1];
-                    return { blogId: bId, logNo: target?.logNo, title: target?.title.replace(/사진\s*개수\s*\d+/g, "").trim() || "최신 포스트", isBlocked: false };
-                });
+                    const results = [];
+                    const links = Array.from(document.querySelectorAll('a'));
+                    for (const l of links) {
+                        const container = l.closest('div[class*="card__"], li[class*="card__"], div[class*="item__"], li[class*="item__"], .lst_section_item, div[class*="post_area"]');
+                        if (!container) continue;
+                        
+                        const isPop = !!l.closest('[class*="popular"], [id*="popular"], [class*="notice"], [id*="notice"]');
+                        if (isPop) continue;
+
+                        const m = l.href.match(/logNo=(\d+)/) || l.href.match(/\/(\d+)(?:\?|$)/);
+                        if (!m) continue;
+                        
+                        const logNo = parseInt(m[1]);
+                        if (!logNo) continue;
+                        
+                        const titleEl = container.querySelector('strong, h3, [class*="title"], .title') || l;
+                        results.push({ logNo, title: titleEl.textContent?.trim() || "최신 포스트" });
+                    }
+                    
+                    if (results.length === 0) {
+                        for (const l of links) {
+                            const isPop = !!l.closest('[class*="popular"], [id*="popular"]');
+                            if (isPop) continue;
+                            const m = l.href.match(/logNo=(\d+)/) || l.href.match(/\/(\d+)(?:\?|$)/);
+                            if (m) results.push({ logNo: parseInt(m[1]), title: l.textContent?.trim() || "최신 포스트" });
+                        }
+                    }
+                    
+                    const target = results.sort((a, b) => b.logNo - a.logNo)[0];
+                    return { blogId: nId, logNo: target?.logNo, title: (target?.title || "최신 포스트").replace(/사진\s*개수\s*\d+/g, "").trim(), isBlocked: false };
+                }, neighborBlogId);
 
                 if (info.isBlocked) {
                     console.log(`[Visit] ${neighborBlogId}님의 블로그는 접근 불가 상태입니다.`);
