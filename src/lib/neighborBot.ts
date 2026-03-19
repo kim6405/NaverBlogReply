@@ -17,103 +17,102 @@ export class NeighborBot {
 
     /**
      * 댓글 입력 영역에 텍스트를 입력하는 헬퍼 메서드.
-     * textarea(fill) → contenteditable(innerText) → keyboard.type() 순으로 시도합니다.
+     * 1) 입력 영역을 스크롤하여 뷰포트에 노출
+     * 2) 존재하는 입력 요소를 단일 evaluate로 빠르게 탐지
+     * 3) fill() → evaluate 삽입 → keyboard.type() 순으로 시도
      */
     private async typeComment(targetPage: Page, comment: string): Promise<boolean> {
-        // 셀렉터 목록 (댓글 입력 가능한 요소들)
-        const selectors = [
-            'textarea.u_cbox_text',
-            '.u_cbox_write_area .u_cbox_text',
-            '#u_cbox_contents',
-            '.u_cbox_write_area textarea',
-            '[contenteditable="true"].u_cbox_text',
-            '.u_cbox_inbox [contenteditable="true"]',
-        ];
+        // 0단계: 댓글 입력 영역을 뷰포트에 노출시킴 (스크롤)
+        await targetPage.evaluate(() => {
+            const writeArea = document.querySelector('.u_cbox_write_area');
+            if (writeArea) {
+                writeArea.scrollIntoView({ behavior: 'instant', block: 'center' });
+            }
+        });
+        await targetPage.waitForTimeout(300);
 
-        // --- 1단계: Playwright fill() 시도 (textarea 전용) ---
-        for (const sel of selectors) {
-            const loc = targetPage.locator(sel).locator('visible=true').first();
-            if (await loc.count() > 0) {
-                try {
-                    await loc.click({ timeout: 3000 });
-                    await targetPage.waitForTimeout(300);
-                    await loc.fill(comment);
-                    await targetPage.waitForTimeout(500);
-
-                    // 입력 검증
-                    const value = await loc.evaluate((el: any) =>
-                        el.value || el.innerText || el.textContent || ''
-                    );
-                    if (value.trim().length > 0) {
-                        console.log(`[typeComment] fill() 성공 (selector: ${sel})`);
-                        return true;
-                    }
-                } catch (e) {
-                    // fill() 실패 시 다음 전략으로
+        // 1단계: 존재하는 입력 요소를 한번에 탐지
+        const foundSelector = await targetPage.evaluate(() => {
+            const candidates = [
+                'textarea.u_cbox_text',
+                '.u_cbox_write_area .u_cbox_text',
+                '#u_cbox_contents',
+                '.u_cbox_write_area textarea',
+                '[contenteditable="true"].u_cbox_text',
+                '.u_cbox_inbox [contenteditable="true"]',
+            ];
+            for (const sel of candidates) {
+                const el = document.querySelector(sel) as HTMLElement | null;
+                if (el && el.offsetParent !== null) {
+                    return { selector: sel, isTextarea: el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' };
                 }
             }
-        }
+            return null;
+        });
 
-        // --- 2단계: contenteditable 등 비표준 요소에 직접 삽입 ---
-        for (const sel of selectors) {
-            const loc = targetPage.locator(sel).locator('visible=true').first();
-            if (await loc.count() > 0) {
-                try {
-                    await loc.click({ force: true, timeout: 3000 });
-                    await targetPage.waitForTimeout(300);
+        if (foundSelector) {
+            const loc = targetPage.locator(foundSelector.selector).locator('visible=true').first();
+            
+            // 시도 A: fill() (textarea에 가장 효과적)
+            try {
+                await loc.click({ timeout: 2000 });
+                await loc.fill(comment);
+                await targetPage.waitForTimeout(200);
 
-                    await loc.evaluate((el: any, val: string) => {
-                        el.focus();
-                        // textarea인 경우
-                        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-                            el.value = val;
-                        } else {
-                            // contenteditable인 경우
-                            el.innerText = val;
-                        }
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                        // React 등의 프레임워크용 이벤트도 dispatch
-                        el.dispatchEvent(new Event('keyup', { bubbles: true }));
-                    }, comment);
-
-                    // 키보드 이벤트 트리거 (네이버 댓글 시스템 활성화용)
-                    await targetPage.keyboard.type(' ');
-                    await targetPage.keyboard.press('Backspace');
-                    await targetPage.waitForTimeout(500);
-
-                    const value = await loc.evaluate((el: any) =>
-                        el.value || el.innerText || el.textContent || ''
-                    );
-                    if (value.trim().length > 0) {
-                        console.log(`[typeComment] evaluate 삽입 성공 (selector: ${sel})`);
-                        return true;
-                    }
-                } catch (e) {
-                    // 실패 시 다음으로
+                const value = await loc.evaluate((el: any) =>
+                    el.value || el.innerText || el.textContent || ''
+                );
+                if (value.trim().length > 0) {
+                    console.log(`[typeComment] fill() 성공`);
+                    return true;
                 }
-            }
+            } catch { /* fill 실패, 다음 시도 */ }
+
+            // 시도 B: evaluate로 직접 값 삽입
+            try {
+                await loc.click({ force: true, timeout: 2000 });
+                await loc.evaluate((el: any, val: string) => {
+                    el.focus();
+                    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                        el.value = val;
+                    } else {
+                        el.innerText = val;
+                    }
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.dispatchEvent(new Event('keyup', { bubbles: true }));
+                }, comment);
+                // 네이버 댓글 시스템 등록 버튼 활성화 트리거
+                await targetPage.keyboard.type(' ');
+                await targetPage.keyboard.press('Backspace');
+                await targetPage.waitForTimeout(200);
+
+                const value = await loc.evaluate((el: any) =>
+                    el.value || el.innerText || el.textContent || ''
+                );
+                if (value.trim().length > 0) {
+                    console.log(`[typeComment] evaluate 삽입 성공`);
+                    return true;
+                }
+            } catch { /* 실패, 다음 시도 */ }
         }
 
-        // --- 3단계: 아무 활성 요소에나 키보드로 직접 타이핑 ---
+        // 최종 폴백: 입력 영역 클릭 후 키보드 직접 타이핑
         try {
-            const anyBox = targetPage.locator('.u_cbox_write_area').locator('visible=true').first();
-            if (await anyBox.count() > 0) {
-                await anyBox.click({ force: true });
-                await targetPage.waitForTimeout(500);
-                // 기존 내용 전체 선택 후 삭제
+            const writeArea = targetPage.locator('.u_cbox_write_area').locator('visible=true').first();
+            if (await writeArea.count() > 0) {
+                await writeArea.click({ force: true });
+                await targetPage.waitForTimeout(300);
                 await targetPage.keyboard.down('Control');
                 await targetPage.keyboard.press('A');
                 await targetPage.keyboard.up('Control');
                 await targetPage.keyboard.press('Backspace');
+                await targetPage.keyboard.type(comment, { delay: 20 });
                 await targetPage.waitForTimeout(200);
-                // 직접 키보드 입력
-                await targetPage.keyboard.type(comment, { delay: 30 });
-                await targetPage.waitForTimeout(500);
-                console.log(`[typeComment] keyboard.type() 직접 입력 시도 완료`);
+                console.log(`[typeComment] keyboard.type() 직접 입력 완료`);
                 return true;
             }
-        } catch (e) {
+        } catch {
             console.error(`[typeComment] 모든 입력 방법 실패`);
         }
 
@@ -131,11 +130,11 @@ export class NeighborBot {
 
         try {
             await this.page.goto("https://m.blog.naver.com/FeedList.naver?groupId=1", { waitUntil: "networkidle" });
-            await this.page.waitForTimeout(2000);
+            await this.page.waitForTimeout(1000);
             
             for (let i = 0; i < 3; i++) {
                 await this.page.evaluate(() => window.scrollBy(0, 1500));
-                await this.page.waitForTimeout(1000);
+                await this.page.waitForTimeout(500);
             }
 
             const feedPosts = await this.page.evaluate(() => {
@@ -189,8 +188,8 @@ export class NeighborBot {
                 try {
                     console.log(`[Visit-Feed] ${post.blogId}님의 새글("${post.title}")을 읽는 중...`);
                     newPage = await this.context.newPage();
-                    await newPage.goto(`https://m.blog.naver.com/${post.blogId}/${post.logNo}`, { waitUntil: "networkidle" });
-                    await newPage.waitForTimeout(1500);
+                    await newPage.goto(`https://m.blog.naver.com/${post.blogId}/${post.logNo}`, { waitUntil: "domcontentloaded" });
+                    await newPage.waitForSelector('.se-main-container, .post_article, .se-viewer, #post-view', { timeout: 5000 }).catch(() => {});
 
                     const postContent = await newPage.evaluate(() => {
                         const contentEl = document.querySelector('.se-main-container, .post_article, .se-viewer, #post-view');
@@ -203,17 +202,21 @@ export class NeighborBot {
                         return { body, imageUrls: imgs };
                     });
 
+                    // 이미지 병렬 다운로드
                     const aiImages: any[] = [];
-                    for (const imgUrl of postContent.imageUrls) {
-                        try {
-                            const response = await fetch(imgUrl!);
-                            const buffer = await response.arrayBuffer();
-                            aiImages.push({ inlineData: { data: Buffer.from(buffer).toString('base64'), mimeType: response.headers.get('content-type') || 'image/jpeg' } });
-                        } catch (e) { }
+                    if (postContent.imageUrls.length > 0) {
+                        const imgResults = await Promise.allSettled(
+                            postContent.imageUrls.map(async (imgUrl) => {
+                                const response = await fetch(imgUrl!);
+                                const buffer = await response.arrayBuffer();
+                                return { inlineData: { data: Buffer.from(buffer).toString('base64'), mimeType: response.headers.get('content-type') || 'image/jpeg' } };
+                            })
+                        );
+                        imgResults.forEach(r => { if (r.status === 'fulfilled') aiImages.push(r.value); });
                     }
 
-                    await newPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${post.blogId}&logNo=${post.logNo}`, { waitUntil: "networkidle" });
-                    await newPage.waitForSelector('.u_cbox_list', { timeout: 3000 }).catch(() => { });
+                    await newPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${post.blogId}&logNo=${post.logNo}`, { waitUntil: "domcontentloaded" });
+                    await newPage.waitForSelector('.u_cbox_write_area', { timeout: 5000 }).catch(() => {});
 
                     const already = await newPage.evaluate(() => {
                         const myNickEl = document.querySelector('.u_cbox_write_area .u_cbox_nick, .u_header_user_name, .gnb_my_name');
@@ -236,8 +239,10 @@ export class NeighborBot {
                             if (inputted) {
                                 const uploadBtn = newPage.locator('.u_cbox_btn_upload').locator('visible=true').first();
                                 if (await uploadBtn.count() > 0) {
+                                    const navPromise = newPage.waitForResponse(resp => resp.url().includes('CommentWrite') || resp.url().includes('comment'), { timeout: 5000 }).catch(() => null);
                                     await uploadBtn.click({ force: true });
-                                    await newPage.waitForTimeout(3000);
+                                    await navPromise;
+                                    await newPage.waitForTimeout(500);
                                     console.log(`[Visit-Feed] 댓글 작성 완료: ${finalComment}`);
                                     repliesMade++;
                                     await prisma.visitHistory.upsert({
@@ -287,11 +292,11 @@ export class NeighborBot {
                 console.log(`[Visit] ${neighborBlogId}님의 블로그를 방문합니다...`);
                 newPage = await this.context.newPage();
                 await newPage.goto(`https://m.blog.naver.com/${neighborBlogId}?listStyle=card`, { waitUntil: "networkidle" }).catch(()=>{});
-                await newPage.waitForTimeout(2000);
+                await newPage.waitForTimeout(1000);
                 
                 // 스크롤 약간 내리기
                 await newPage.evaluate(() => window.scrollBy(0, 500));
-                await newPage.waitForTimeout(1000);
+                await newPage.waitForTimeout(500);
 
                 const info = await newPage.evaluate((nId) => {
                     const errorMsg = document.body.innerText;
@@ -349,8 +354,8 @@ export class NeighborBot {
 
                     console.log(`[Visit] ${info.blogId}님의 최신글("${info.title}")을 읽는 중...`);
                     const postViewUrl = `https://m.blog.naver.com/${info.blogId}/${info.logNo}`;
-                    await newPage.goto(postViewUrl, { waitUntil: "networkidle" });
-                    await newPage.waitForTimeout(1500);
+                    await newPage.goto(postViewUrl, { waitUntil: "domcontentloaded" });
+                    await newPage.waitForSelector('.se-main-container, .post_article, .se-viewer, #post-view', { timeout: 5000 }).catch(() => {});
 
                     const postContent = await newPage.evaluate(() => {
                         const contentEl = document.querySelector('.se-main-container, .post_article, .se-viewer, #post-view');
@@ -363,26 +368,26 @@ export class NeighborBot {
                         return { body, imageUrls: imgs };
                     });
 
+                    // 이미지 병렬 다운로드
                     const aiImages: any[] = [];
-                    for (const imgUrl of postContent.imageUrls) {
-                        try {
-                            const response = await fetch(imgUrl!);
-                            const buffer = await response.arrayBuffer();
-                            const base64 = Buffer.from(buffer).toString('base64');
-                            const mimeType = response.headers.get('content-type') || 'image/jpeg';
-                            aiImages.push({ inlineData: { data: base64, mimeType } });
-                        } catch (e) {
-                            console.error(`[Visit] 이미지 로드 실패: ${imgUrl}`, e);
-                        }
+                    if (postContent.imageUrls.length > 0) {
+                        const imgResults = await Promise.allSettled(
+                            postContent.imageUrls.map(async (imgUrl) => {
+                                const response = await fetch(imgUrl!);
+                                const buffer = await response.arrayBuffer();
+                                return { inlineData: { data: Buffer.from(buffer).toString('base64'), mimeType: response.headers.get('content-type') || 'image/jpeg' } };
+                            })
+                        );
+                        imgResults.forEach(r => { if (r.status === 'fulfilled') aiImages.push(r.value); });
                     }
 
-                    const response = await newPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${info.blogId}&logNo=${info.logNo}`, { waitUntil: "networkidle" });
-                    if (!response || !response.ok()) {
+                    const navResponse = await newPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${info.blogId}&logNo=${info.logNo}`, { waitUntil: "domcontentloaded" });
+                    if (!navResponse || !navResponse.ok()) {
                         console.log(`[Visit] 댓글 페이지 이동 실패.`);
                         await newPage.close().catch(() => { });
                         continue;
                     }
-                    await newPage.waitForSelector('.u_cbox_list', { timeout: 3000 }).catch(() => { });
+                    await newPage.waitForSelector('.u_cbox_write_area', { timeout: 5000 }).catch(() => {});
 
                     const already = await newPage.evaluate(() => {
                         const myNickEl = document.querySelector('.u_cbox_write_area .u_cbox_nick, .u_header_user_name, .gnb_my_name');
@@ -405,8 +410,10 @@ export class NeighborBot {
                             if (inputted) {
                                 const uploadBtn = newPage.locator('.u_cbox_btn_upload').locator('visible=true').first();
                                 if (await uploadBtn.count() > 0) {
+                                    const navPromise = newPage.waitForResponse(resp => resp.url().includes('CommentWrite') || resp.url().includes('comment'), { timeout: 5000 }).catch(() => null);
                                     await uploadBtn.click({ force: true });
-                                    await newPage.waitForTimeout(3000);
+                                    await navPromise;
+                                    await newPage.waitForTimeout(500);
                                     console.log(`[Visit] 맞춤형 댓글 작성 완료: ${finalComment}`);
                                     repliesMade++;
                                     
@@ -441,7 +448,7 @@ export class NeighborBot {
                 await newPage.close().catch(() => { });
                 if (this.page && !this.page.isClosed()) {
                     await this.page.bringToFront();
-                    await this.page.waitForTimeout(1000);
+                    await this.page.waitForTimeout(500);
                 }
             } catch (e: any) {
                 console.error(`[Visit] 이웃 방문 중 오류: ${e.message}`);
