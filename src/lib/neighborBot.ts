@@ -52,7 +52,7 @@ export class NeighborBot {
 
         if (foundSelector) {
             const loc = targetPage.locator(foundSelector.selector).locator('visible=true').first();
-            
+
             // 시도 A: fill() (textarea에 가장 효과적)
             try {
                 await loc.click({ timeout: 2000 });
@@ -122,17 +122,18 @@ export class NeighborBot {
     /**
      * 이웃 새글 피드 탐색 및 댓글 작성
      */
-    async processNeighborFeed(generateReplyFn: (comment: string, images?: any[]) => Promise<string>): Promise<number> {
+    async processNeighborFeed(generateReplyFn: (comment: string, images?: any[]) => Promise<string>, maxComments: number = 30): Promise<number> {
         if (!this.page) throw new Error("Bot not initialized");
-        
-        console.log("[Bot] 이웃 새글 피드를 탐색합니다...");
+
+        console.log(`[Bot] 이웃 새글 피드를 탐색합니다... (최대 ${maxComments}건 댓글 작성)`);
         let repliesMade = 0;
 
         try {
-            await this.page.goto("https://m.blog.naver.com/FeedList.naver?groupId=1", { waitUntil: "networkidle" });
+            await this.page.goto("https://m.blog.naver.com/FeedList.naver?groupId=1", { waitUntil: "domcontentloaded" });
             await this.page.waitForTimeout(1000);
-            
-            for (let i = 0; i < 3; i++) {
+
+            // 충분한 포스트를 로드하기 위해 스크롤을 여러 번 수행
+            for (let i = 0; i < 15; i++) {
                 await this.page.evaluate(() => window.scrollBy(0, 1500));
                 await this.page.waitForTimeout(500);
             }
@@ -141,7 +142,7 @@ export class NeighborBot {
                 const containers = Array.from(document.querySelectorAll('.card_item, .feed_card_item, li[class*="item"], div[class*="item"]'));
                 const results: { url: string, blogId: string, logNo: string, title: string }[] = [];
                 const seenLogNos = new Set();
-                
+
                 containers.forEach(container => {
                     const linkEl = container.querySelector('a');
                     if (!linkEl) return;
@@ -157,12 +158,12 @@ export class NeighborBot {
 
                     const key = `${blogId}_${logNo}`;
                     if (seenLogNos.has(key)) return;
-                    
+
                     const hasFollowBtn = !!container.querySelector('[class*="add_btn"], [class*="follow_btn"]');
                     const innerText = container.textContent || "";
                     const isRecommendText = innerText.includes('추천글') || innerText.includes('추천 블로그') || innerText.includes('광고');
                     const isRecommendMark = !!container.querySelector('[class*="recommend"], [id*="recommend"], .spcb, .spc_txt, .text_ad');
-                    
+
                     if (!(hasFollowBtn || isRecommendText || isRecommendMark)) {
                         seenLogNos.add(key);
                         const titleEl = container.querySelector('strong, h3, [class*="title"], .title');
@@ -175,6 +176,12 @@ export class NeighborBot {
             console.log(`[Bot] 이웃 새글 피드에서 ${feedPosts.length}개의 포스트를 발견했습니다.`);
 
             for (const post of feedPosts) {
+                // 최대 댓글 수 제한 체크
+                if (repliesMade >= maxComments) {
+                    console.log(`[Bot] 이웃 댓글 ${maxComments}건 달성. 이웃 새글 탐색을 종료합니다.`);
+                    break;
+                }
+
                 const history = await prisma.visitHistory.findUnique({
                     where: { blogId_postId: { blogId: post.blogId, postId: post.logNo } }
                 });
@@ -189,7 +196,7 @@ export class NeighborBot {
                     console.log(`[Visit-Feed] ${post.blogId}님의 새글("${post.title}")을 읽는 중...`);
                     newPage = await this.context.newPage();
                     await newPage.goto(`https://m.blog.naver.com/${post.blogId}/${post.logNo}`, { waitUntil: "domcontentloaded" });
-                    await newPage.waitForSelector('.se-main-container, .post_article, .se-viewer, #post-view', { timeout: 5000 }).catch(() => {});
+                    await newPage.waitForSelector('.se-main-container, .post_article, .se-viewer, #post-view', { timeout: 5000 }).catch(() => { });
 
                     const postContent = await newPage.evaluate(() => {
                         const contentEl = document.querySelector('.se-main-container, .post_article, .se-viewer, #post-view');
@@ -216,7 +223,7 @@ export class NeighborBot {
                     }
 
                     await newPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${post.blogId}&logNo=${post.logNo}`, { waitUntil: "domcontentloaded" });
-                    await newPage.waitForSelector('.u_cbox_write_area', { timeout: 5000 }).catch(() => {});
+                    await newPage.waitForSelector('.u_cbox_write_area', { timeout: 5000 }).catch(() => { });
 
                     const already = await newPage.evaluate(() => {
                         const myNickEl = document.querySelector('.u_cbox_write_area .u_cbox_nick, .u_header_user_name, .gnb_my_name');
@@ -233,7 +240,7 @@ export class NeighborBot {
 
                         console.log(`[Visit-Feed] 댓글 작성 시도: ${post.blogId}`);
                         await newPage.bringToFront();
-                        
+
                         try {
                             const inputted = await this.typeComment(newPage, finalComment);
                             if (inputted) {
@@ -263,18 +270,18 @@ export class NeighborBot {
                             where: { blogId_postId: { blogId: post.blogId, postId: post.logNo } },
                             update: {},
                             create: { blogId: post.blogId, postId: post.logNo }
-                        }).catch(() => {});
+                        }).catch(() => { });
                     }
                 } catch (e: any) {
                     console.error(`[Visit-Feed] 오류: ${e.message}`);
                 } finally {
-                    await newPage?.close().catch(() => {});
+                    await newPage?.close().catch(() => { });
                 }
             }
         } catch (e: any) {
             console.error(`[Bot] 피드 탐색 중 오류: ${e.message}`);
         }
-        
+
         console.log(`[Bot] 이웃 새글 탐색 완료. 총 ${repliesMade}건 답방 작성.`);
         return repliesMade;
     }
@@ -291,9 +298,9 @@ export class NeighborBot {
                 if (!this.page || this.page.isClosed()) break;
                 console.log(`[Visit] ${neighborBlogId}님의 블로그를 방문합니다...`);
                 newPage = await this.context.newPage();
-                await newPage.goto(`https://m.blog.naver.com/${neighborBlogId}?listStyle=card`, { waitUntil: "networkidle" }).catch(()=>{});
+                await newPage.goto(`https://m.blog.naver.com/${neighborBlogId}?listStyle=card`, { waitUntil: "domcontentloaded" }).catch(() => { });
                 await newPage.waitForTimeout(1000);
-                
+
                 // 스크롤 약간 내리기
                 await newPage.evaluate(() => window.scrollBy(0, 500));
                 await newPage.waitForTimeout(500);
@@ -308,20 +315,20 @@ export class NeighborBot {
                     for (const l of links) {
                         const container = l.closest('div[class*="card__"], li[class*="card__"], div[class*="item__"], li[class*="item__"], .lst_section_item, div[class*="post_area"]');
                         if (!container) continue;
-                        
+
                         const isPop = !!l.closest('[class*="popular"], [id*="popular"], [class*="notice"], [id*="notice"]');
                         if (isPop) continue;
 
                         const m = l.href.match(/logNo=(\d+)/) || l.href.match(/\/(\d+)(?:\?|$)/);
                         if (!m) continue;
-                        
+
                         const logNo = parseInt(m[1]);
                         if (!logNo) continue;
-                        
+
                         const titleEl = container.querySelector('strong, h3, [class*="title"], .title') || l;
                         results.push({ logNo, title: titleEl.textContent?.trim() || "최신 포스트" });
                     }
-                    
+
                     if (results.length === 0) {
                         for (const l of links) {
                             const isPop = !!l.closest('[class*="popular"], [id*="popular"]');
@@ -330,7 +337,7 @@ export class NeighborBot {
                             if (m) results.push({ logNo: parseInt(m[1]), title: l.textContent?.trim() || "최신 포스트" });
                         }
                     }
-                    
+
                     const target = results.sort((a, b) => b.logNo - a.logNo)[0];
                     return { blogId: nId, logNo: target?.logNo, title: (target?.title || "최신 포스트").replace(/사진\s*개수\s*\d+/g, "").trim(), isBlocked: false };
                 }, neighborBlogId);
@@ -340,7 +347,7 @@ export class NeighborBot {
                     await newPage.close().catch(() => { });
                     continue;
                 }
-                
+
                 if (info.logNo && info.blogId) {
                     // History DB 체크
                     const history = await prisma.visitHistory.findUnique({
@@ -355,7 +362,7 @@ export class NeighborBot {
                     console.log(`[Visit] ${info.blogId}님의 최신글("${info.title}")을 읽는 중...`);
                     const postViewUrl = `https://m.blog.naver.com/${info.blogId}/${info.logNo}`;
                     await newPage.goto(postViewUrl, { waitUntil: "domcontentloaded" });
-                    await newPage.waitForSelector('.se-main-container, .post_article, .se-viewer, #post-view', { timeout: 5000 }).catch(() => {});
+                    await newPage.waitForSelector('.se-main-container, .post_article, .se-viewer, #post-view', { timeout: 5000 }).catch(() => { });
 
                     const postContent = await newPage.evaluate(() => {
                         const contentEl = document.querySelector('.se-main-container, .post_article, .se-viewer, #post-view');
@@ -387,7 +394,7 @@ export class NeighborBot {
                         await newPage.close().catch(() => { });
                         continue;
                     }
-                    await newPage.waitForSelector('.u_cbox_write_area', { timeout: 5000 }).catch(() => {});
+                    await newPage.waitForSelector('.u_cbox_write_area', { timeout: 5000 }).catch(() => { });
 
                     const already = await newPage.evaluate(() => {
                         const myNickEl = document.querySelector('.u_cbox_write_area .u_cbox_nick, .u_header_user_name, .gnb_my_name');
@@ -404,7 +411,7 @@ export class NeighborBot {
 
                         console.log(`[Visit] ${info.blogId} 댓글 작성 시도...`);
                         await newPage.bringToFront();
-                        
+
                         try {
                             const inputted = await this.typeComment(newPage, finalComment);
                             if (inputted) {
@@ -416,14 +423,14 @@ export class NeighborBot {
                                     await newPage.waitForTimeout(500);
                                     console.log(`[Visit] 맞춤형 댓글 작성 완료: ${finalComment}`);
                                     repliesMade++;
-                                    
+
                                     try {
                                         await prisma.visitHistory.upsert({
                                             where: { blogId_postId: { blogId: info.blogId, postId: info.logNo.toString() } },
                                             update: {},
                                             create: { blogId: info.blogId, postId: info.logNo.toString() }
                                         });
-                                    } catch (error) {}
+                                    } catch (error) { }
                                 } else {
                                     console.log(`[Visit] 등록 버튼을 찾을 수 없습니다.`);
                                 }
@@ -441,7 +448,7 @@ export class NeighborBot {
                                 update: {},
                                 create: { blogId: info.blogId!, postId: info.logNo!.toString() }
                             });
-                        } catch(e) {}
+                        } catch (e) { }
                     }
                     this.visitedNeighbors.add(info.blogId);
                 }
@@ -452,7 +459,7 @@ export class NeighborBot {
                 }
             } catch (e: any) {
                 console.error(`[Visit] 이웃 방문 중 오류: ${e.message}`);
-                await newPage?.close().catch(()=>{});
+                await newPage?.close().catch(() => { });
             }
         }
         return repliesMade;

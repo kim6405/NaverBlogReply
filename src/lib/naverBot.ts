@@ -53,12 +53,29 @@ export class NaverBlogBot {
         } catch (e) {
             console.error("[Bot] Error closing browser:", e);
         }
+        this.context = null;
+        this.page = null;
+    }
+
+    /**
+     * 브라우저가 아직 활성 상태인지 확인합니다.
+     */
+    async isAlive(): Promise<boolean> {
+        try {
+            if (!this.page || !this.context) return false;
+            if (this.page.isClosed()) return false;
+            // 간단한 evaluate로 실제 연결 확인
+            await this.page.evaluate(() => true);
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     async ensureLogin(blogId?: string) {
         if (!this.page) throw new Error("Bot not initialized");
 
-        await this.page.goto("https://nid.naver.com/nidlogin.login", { waitUntil: "networkidle" });
+        await this.page.goto("https://nid.naver.com/nidlogin.login", { waitUntil: "domcontentloaded" });
 
         if (this.page.url().includes("nidlogin.login")) {
             console.log("로그인이 필요합니다. 브라우저 창에서 로그인을 완료해주세요.");
@@ -74,7 +91,7 @@ export class NaverBlogBot {
         }
 
         if (blogId) {
-            await this.page.goto(`https://m.blog.naver.com/${blogId}`, { waitUntil: "networkidle" });
+            await this.page.goto(`https://m.blog.naver.com/${blogId}`, { waitUntil: "domcontentloaded" });
             await this.page.waitForTimeout(2000);
             const isOwner = await this.page.evaluate(() => {
                 const neighborKeywords = ['이웃추가', '서로이웃', '이웃'];
@@ -101,7 +118,7 @@ export class NaverBlogBot {
     async crawlComments(blogId: string): Promise<PostInfo[]> {
         if (!this.page) throw new Error("Bot not initialized");
         const url = `https://m.blog.naver.com/${blogId}?listStyle=card`;
-        await this.page.goto(url, { waitUntil: "networkidle" });
+        await this.page.goto(url, { waitUntil: "domcontentloaded" });
         await this.page.evaluate(() => { document.body.style.zoom = "0.7"; });
         await this.page.waitForTimeout(1000);
         for (let i = 0; i < 3; i++) {
@@ -113,7 +130,12 @@ export class NaverBlogBot {
             const seenLogNos = new Set();
             Array.from(document.querySelectorAll('a')).forEach(link => {
                 const postUrl = link.href;
-                const logNoMatch = postUrl.match(/logNo=(\d+)/) || postUrl.match(/\/(\d+)\??/);
+
+                // 블로그 포스트 URL만 허용 (통계, 관리 등 비정상 URL 제외)
+                const isBlogUrl = postUrl.includes('blog.naver.com') && !postUrl.includes('blog.stat.naver.com') && !postUrl.includes('/admin') && !postUrl.includes('/manage');
+                if (!isBlogUrl) return;
+
+                const logNoMatch = postUrl.match(/logNo=(\d+)/) || postUrl.match(/\/([0-9]{10,})(?:\?|$|#)/);
                 const naverPostId = logNoMatch ? logNoMatch[1] : "";
                 if (!naverPostId || seenLogNos.has(naverPostId)) return;
                 const isPopular = !!link.closest('[class*="popular"], [id*="popular"]');
@@ -145,7 +167,7 @@ export class NaverBlogBot {
             if (p.totalCommentCount > 0 && p.canCheckComment) {
                 try {
                     const commentPage = await this.context!.newPage();
-                    await commentPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${blogId}&logNo=${p.naverPostId}`, { waitUntil: "networkidle" });
+                    await commentPage.goto(`https://m.blog.naver.com/CommentList.naver?blogId=${blogId}&logNo=${p.naverPostId}`, { waitUntil: "domcontentloaded" });
                     await commentPage.waitForSelector('.u_cbox_comment', { timeout: 3000 }).catch(() => { });
                     const data = await commentPage.$$eval('.u_cbox_comment', els => els.map(el => {
                         const isReply = !!el.closest('.u_cbox_reply_area');
@@ -197,11 +219,44 @@ export class NaverBlogBot {
 
     async writeRepliesForPost(url: string, generateReplyFn: (comment: string, images?: any[]) => Promise<string>): Promise<number> {
         if (!this.page) throw new Error("Bot not initialized");
-        const blogIdMatch = url.match(/blogId=([^&]+)/);
-        const logNoMatch = url.match(/logNo=(\d+)/) || url.match(/\/(\d+)\??/);
-        const targetUrl = (blogIdMatch && logNoMatch) ? `https://m.blog.naver.com/CommentList.naver?blogId=${blogIdMatch[1]}&logNo=${logNoMatch[1]}` : url;
-        await this.page.goto(targetUrl, { waitUntil: "networkidle" });
-        await this.page.waitForTimeout(2000);
+
+        // blogId 추출: 쿼리 파라미터 또는 경로에서 추출
+        let blogId: string | null = null;
+        let logNo: string | null = null;
+
+        const blogIdParamMatch = url.match(/blogId=([^&]+)/);
+        if (blogIdParamMatch) {
+            blogId = blogIdParamMatch[1];
+        } else {
+            // 경로 기반 URL: https://m.blog.naver.com/{blogId}/{logNo}
+            const pathMatch = url.match(/m\.blog\.naver\.com\/([a-zA-Z0-9_-]+)\/([0-9]+)/);
+            if (pathMatch) {
+                blogId = pathMatch[1];
+                logNo = pathMatch[2];
+            }
+        }
+
+        const logNoParamMatch = url.match(/logNo=(\d+)/);
+        if (logNoParamMatch) {
+            logNo = logNoParamMatch[1];
+        } else if (!logNo) {
+            // 경로에서 10자리 이상의 숫자를 logNo로 추출
+            const logNoPathMatch = url.match(/\/([0-9]{10,})(?:\?|$|#)/);
+            if (logNoPathMatch) logNo = logNoPathMatch[1];
+        }
+
+        // 비정상 URL 방어: blog.stat.naver.com 등 비블로그 URL 감지
+        if (!blogId || !logNo || url.includes('blog.stat.naver.com')) {
+            console.warn(`[Bot] 유효하지 않은 포스트 URL, 건너뜀: ${url}`);
+            return 0;
+        }
+
+        const targetUrl = `https://m.blog.naver.com/CommentList.naver?blogId=${blogId}&logNo=${logNo}`;
+        console.log(`[Bot] 댓글 페이지 이동: ${targetUrl}`);
+
+        // domcontentloaded 사용: 브라우저 최소화 시 networkidle 타임아웃 방지
+        await this.page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await this.page.waitForTimeout(3000);
         await this.page.waitForSelector('.u_cbox_list', { timeout: 10000 }).catch(() => { });
         await this.page.evaluate(() => window.scrollBy(0, 500));
         await this.page.waitForTimeout(1000);

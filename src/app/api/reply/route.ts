@@ -1,7 +1,16 @@
 import { NextResponse } from "next/server";
-import { NaverBlogBot } from "@/lib/naverBot";
+import { getBot } from "@/lib/botManager";
 import { prisma } from "@/lib/prisma";
 import { generateReply } from "@/lib/gemini";
+
+/**
+ * 취침 시간(오후 11시 ~ 오전 9시)인지 확인합니다.
+ */
+function isQuietTime(): boolean {
+  const now = new Date();
+  const hour = now.getHours();
+  return hour >= 23 || hour < 9;
+}
 
 export async function POST(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -11,54 +20,104 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "블로그 ID가 설정되지 않았습니다." }, { status: 400 });
   }
 
-  const postsWithComments = await prisma.post.findMany({
-    where: { 
-      blogId: blogId,
-      commentCount: { gt: 0 } 
-    },
-  });
+  // 취침 시간 확인
+  if (isQuietTime()) {
+    return NextResponse.json({
+      success: true,
+      skipped: true,
+      reason: "취침 시간(오후 11시 ~ 오전 9시)이므로 작업을 건너뜁니다.",
+      replyCount: 0
+    });
+  }
 
-  const bot = new NaverBlogBot();
   let totalReplyCount = 0;
 
-    try {
-      await bot.init();
-      await bot.ensureLogin(blogId); 
-      
-      // 1. [신규] 이웃블로그 새글 탐색 및 댓글 작성 진행
-      console.log("Starting neighbor feed check...");
-      const feedReplyCount = await bot.processNeighborFeed(async (commentText, images) => {
+  try {
+    // botManager를 통해 싱글톤 봇을 가져옵니다.
+    // 최초 호출 시에만 브라우저 초기화 + 로그인이 수행됩니다.
+    const bot = await getBot(blogId);
+
+    // ───────────────────────────────────────────
+    // 1단계: 이웃 블로그 새글 탐색 및 댓글 작성 (최우선)
+    // ───────────────────────────────────────────
+    console.log("[자동화] 1단계: 이웃 새글 탐색 시작...");
+    const feedReplyCount = await bot.processNeighborFeed(async (commentText, images) => {
+      return await generateReply(commentText, images);
+    });
+    totalReplyCount += feedReplyCount;
+    console.log(`[자동화] 1단계 완료: 이웃 댓글 ${feedReplyCount}건 작성`);
+
+    // ───────────────────────────────────────────
+    // 2단계: 내 블로그 최근 30일 포스트 스캔 (크롤링)
+    // ───────────────────────────────────────────
+    console.log("[자동화] 2단계: 내 블로그 포스트 스캔 시작...");
+    const crawledPosts = await bot.crawlComments(blogId);
+
+    // 크롤링 결과를 DB에 반영
+    for (const post of crawledPosts) {
+      await prisma.post.upsert({
+        where: {
+          blogId_naverPostId: { blogId, naverPostId: post.naverPostId }
+        },
+        update: {
+          title: post.title,
+          url: post.url,
+          commentCount: post.commentCount,
+          postDate: post.postDate,
+          lastSeenAt: new Date(),
+        },
+        create: {
+          blogId,
+          naverPostId: post.naverPostId,
+          title: post.title,
+          url: post.url,
+          commentCount: post.commentCount,
+          postDate: post.postDate,
+          lastSeenAt: new Date(),
+        },
+      });
+    }
+    console.log(`[자동화] 2단계 완료: ${crawledPosts.length}개 포스트 스캔됨`);
+
+    // 이번 사이클의 신규 댓글 수 계산 (스캔된 포스트들의 댓글 합계)
+    const cycleNewComments = crawledPosts.reduce((acc, p) => acc + p.commentCount, 0);
+
+    // ───────────────────────────────────────────
+    // 3단계: 스캔된 포스트 중 미답변 댓글이 있는 것에 대댓글 작성
+    // ───────────────────────────────────────────
+    const postsWithComments = crawledPosts.filter(p => p.commentCount > 0);
+    console.log(`[자동화] 3단계: ${postsWithComments.length}개 포스트에 대댓글 작성 시작...`);
+
+    for (const post of postsWithComments) {
+      console.log(`  → 포스트 처리 중: ${post.title}`);
+
+      const count = await bot.writeRepliesForPost(post.url, async (commentText, images) => {
         return await generateReply(commentText, images);
       });
-      totalReplyCount += feedReplyCount;
 
-      // 2. [기존] 내 블로그 대댓글 처리 & 해당 작성자의 최신 글 답방
-      for (const post of postsWithComments) {
-        console.log(`Processing post: ${post.title}`);
-        
-        const count = await bot.writeRepliesForPost(post.url, async (commentText, images) => {
-          return await generateReply(commentText, images);
-        });
-        
-        totalReplyCount += count;
+      totalReplyCount += count;
 
-        await prisma.post.update({
-          where: { id: post.id },
-          data: { commentCount: 0 }
-        });
-      }
+      await prisma.post.updateMany({
+        where: { blogId, naverPostId: post.naverPostId },
+        data: { commentCount: 0 }
+      });
+    }
+    const myBlogReplies = totalReplyCount - feedReplyCount;
+    console.log(`[자동화] 3단계 완료: 대댓글 ${myBlogReplies}건 작성`);
 
-      // 통계 업데이트
+    // ───────────────────────────────────────────
+    // 통계 업데이트
+    // ───────────────────────────────────────────
     await prisma.dashboardStats.upsert({
-      where: { blogId: blogId },
-      update: { 
+      where: { blogId },
+      update: {
         totalReplies: { increment: totalReplyCount },
         todayReplies: { increment: totalReplyCount },
         lastReplyDate: new Date(),
-        lastCrawlTime: new Date() 
+        lastCrawlTime: new Date()
       },
       create: {
-        blogId: blogId,
+        blogId,
         totalReplies: totalReplyCount,
         todayReplies: totalReplyCount,
         lastReplyDate: new Date(),
@@ -66,12 +125,24 @@ export async function POST(request: Request) {
       }
     });
 
-    return NextResponse.json({ success: true, replyCount: totalReplyCount });
+    console.log(`[자동화] 전체 완료: 총 ${totalReplyCount}건 (이웃 ${feedReplyCount}건 + 대댓글 ${myBlogReplies}건)`);
+
+    // ⚠️ 주의: 여기서 bot.close()를 호출하지 않습니다!
+    // 브라우저는 botManager에 의해 유지되며, 다음 사이클에서 재사용됩니다.
+    // 종료는 settings API의 "stop" 액션에서만 수행됩니다.
+
+    return NextResponse.json({
+      success: true,
+      replyCount: totalReplyCount,
+      cycleStats: {
+        newComments: cycleNewComments,       // 이번 사이클에서 발견된 신규 댓글 수
+        neighborReplies: feedReplyCount,     // 이웃 블로그에 작성한 댓글 수
+        myBlogReplies: myBlogReplies,        // 내 블로그에 작성한 대댓글 수
+        scannedPosts: crawledPosts.length,   // 스캔된 포스트 수
+      }
+    });
   } catch (error: any) {
-    console.error("Auto reply error:", error);
+    console.error("[자동화] 오류 발생:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
-  } finally {
-    await bot.close();
   }
 }
-

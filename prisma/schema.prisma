@@ -46,6 +46,7 @@ model DashboardStats {
   todayReplies   Int      @default(0)
   lastReplyDate  DateTime?
   lastCrawlTime  DateTime @default(now())
+  isAutoRunning  Boolean  @default(false)
 }
 
 model VisitHistory {
