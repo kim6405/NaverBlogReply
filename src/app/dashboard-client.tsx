@@ -4,11 +4,13 @@ import { useRouter } from "next/navigation";
 import { useState, useEffect, useRef, useCallback } from "react";
 
 
-// 2~4시간 사이 랜덤 밀리초 생성
+// 사이클 간격 설정 (시간 단위)
+const MIN_INTERVAL_HOURS = 2;
+const MAX_INTERVAL_HOURS = 4;
+
+// 설정된 간격 사이 랜덤 밀리초 생성
 function getRandomInterval(): number {
-  const minHours = 2;
-  const maxHours = 4;
-  const hours = minHours + Math.random() * (maxHours - minHours);
+  const hours = MIN_INTERVAL_HOURS + Math.random() * (MAX_INTERVAL_HOURS - MIN_INTERVAL_HOURS);
   return Math.round(hours * 60 * 60 * 1000);
 }
 
@@ -68,7 +70,7 @@ export default function DashboardClient({
   // 누적 카운트 (자동 실행 세션 동안 사이클별 누적 등)
   const [cumulativeStats, setCumulativeStats] = useState({
     newComments: 0,      // 신규 댓글 누적
-    totalReplies: 0,     // 총 작성 대댓글 누적
+    totalReplies: 0,     // 총 작성 댓글 누적
     activePosts: 0,      // 진행 중인 포스트 (누적은 아니지만 자동 실행 전엔 0으로 시작)
   });
 
@@ -118,7 +120,7 @@ export default function DashboardClient({
 
     setIsWorking(true);
     setAutoStatus("working");
-    addLog('scan', '🔄 자동 사이클 시작: 이웃 새글 탐색 → 내 블로그 스캔 → 대댓글 작성...');
+    addLog('scan', '🔄 자동 사이클 시작: 이웃 새글 탐색 → 내 블로그 스캔 → 댓글 작성...');
 
     try {
       const res = await fetch(`/api/reply?blogId=${encodeURIComponent(blogId.trim())}`, { method: 'POST' });
@@ -240,7 +242,7 @@ export default function DashboardClient({
       alert("네이버 블로그 아이디를 먼저 입력해주세요.");
       return;
     }
-    addLog('info', '🚀 자동 실행을 시작합니다. (4시간 주기)');
+    addLog('info', `🚀 자동 실행을 시작합니다. (${MIN_INTERVAL_HOURS}~${MAX_INTERVAL_HOURS}시간 주기)`);
     // 자동 실행 시작 시 로컬 카운트 초기화
     setCumulativeStats({ newComments: 0, totalReplies: 0, activePosts: 0 });
     setAutoStatus("running");
@@ -295,7 +297,7 @@ export default function DashboardClient({
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard title="신규 댓글" value={cumulativeStats.newComments} unit="건" color="green" progress={cumulativeStats.newComments > 0 ? 100 : 0} />
         <StatCard title="진행 중인 포스트" value={cumulativeStats.activePosts} unit="개" color="blue" progress={cumulativeStats.activePosts > 0 ? 100 : 0} />
-        <StatCard title="총 작성 대댓글" value={cumulativeStats.totalReplies} unit="건" color="purple" />
+        <StatCard title="총 작성 댓글" value={cumulativeStats.totalReplies} unit="건" color="purple" />
         <div className="bg-slate-900/80 p-6 rounded-3xl border border-slate-700 backdrop-blur-md shadow-xl transition-all flex flex-col justify-between">
           <div>
             <p className="text-slate-200 font-bold mb-1">블로그 연결</p>
@@ -372,9 +374,9 @@ export default function DashboardClient({
 
         {/* 안내 문구 */}
         <div className="mt-4 text-sm text-slate-400 space-y-1">
-          <p>• <strong>자동 실행 시작</strong>: 즉시 첫 사이클을 실행하고, 이후 2~4시간 간격으로 랜덤 반복합니다.</p>
+          <p>• <strong>자동 실행 시작</strong>: 즉시 첫 사이클을 실행하고, 이후 {MIN_INTERVAL_HOURS}~{MAX_INTERVAL_HOURS}시간 간격으로 랜덤 반복합니다.</p>
           <p>• <strong>취침 시간</strong>(오후 11시 ~ 오전 9시)에는 자동으로 작업이 중단되며, 오전 9시에 자동 재개됩니다.</p>
-          <p>• 실행 순서: 이웃 새글 댓글(최대 30개) → 내 블로그 포스트 스캔(30일) → 대댓글 작성</p>
+          <p>• 실행 순서: 이웃 새글 댓글(최대 30개) → 내 블로그 포스트 스캔(30일) → 댓글 작성</p>
         </div>
       </div>
 

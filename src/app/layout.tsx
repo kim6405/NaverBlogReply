@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Naver Blog AI Reply",
-  description: "AI를 이용한 네이버 블로그 자동 대댓글 시스템",
+  description: "AI를 이용한 네이버 블로그 자동 댓글 시스템",
 };
 
 export default async function RootLayout({

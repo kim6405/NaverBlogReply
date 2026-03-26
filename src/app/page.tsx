@@ -18,9 +18,9 @@ export default async function Page({
         {/* ... (keep existing content) */}
         <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-green-400 to-green-600 flex items-center justify-center text-5xl animate-pulse shadow-[0_0_40px_rgba(34,197,94,0.3)]">AI</div>
         <div className="text-center space-y-3">
-          <h1 className="text-4xl font-black text-white sm:text-5xl tracking-tight">AI 대댓글 서비스</h1>
+          <h1 className="text-4xl font-black text-white sm:text-5xl tracking-tight">AI 댓글 서비스</h1>
           <p className="text-slate-300 max-w-md mx-auto text-lg leading-relaxed">
-            네이버 블로그의 댓글을 AI가 분석하고 당신의 목소리로 대댓글을 작성합니다.
+            네이버 블로그의 댓글을 AI가 분석하고 당신의 목소리로 댓글을 작성합니다.
           </p>
         </div>
         <form
