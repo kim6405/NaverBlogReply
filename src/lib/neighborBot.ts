@@ -132,46 +132,87 @@ export class NeighborBot {
             await this.page.goto("https://m.blog.naver.com/FeedList.naver?groupId=1", { waitUntil: "domcontentloaded" });
             await this.page.waitForTimeout(1000);
 
-            // 충분한 포스트를 로드하기 위해 스크롤을 여러 번 수행
+            // 가상 스크롤(virtual scroll) 환경에서는 뷰포트를 벗어난 아이템이 DOM에서 제거될 수 있습니다.
+            // 따라서 스크롤을 내릴 때마다 현재 보이는 아이템을 점진적으로 수집합니다.
+            const collectedFeedMap = new Map<string, { url: string, blogId: string, logNo: string, title: string }>();
+
             for (let i = 0; i < 15; i++) {
+                // 수정된 방식: 먼저 a 태그를 모두 찾고 href를 분석해 블로그 포스트를 식별합니다. (클래스명 의존성 제거)
+                const currentPosts = await this.page.evaluate(() => {
+                    const links = Array.from(document.querySelectorAll('a'));
+                    const results: { url: string, blogId: string, logNo: string, title: string }[] = [];
+
+                    links.forEach(linkEl => {
+                        const href = linkEl.href;
+                        // 기본적으로 블로그 포스트 권장 URL 형식을 따르는지 확인
+                        if (!href.includes('blog.naver.com')) return;
+                        
+                        // 관리 기능, 통계, 내 블로그 등 제외
+                        if (href.includes('Recommendation') || href.includes('FeedList') || href.includes('CommentList') || href.includes('PostList') || href.includes('MyBlog')) return;
+
+                        // blogId 추출
+                        const blogIdMatch = href.match(/blogId=([^&]+)/) || href.match(/m\.blog\.naver\.com\/([^\/\?#]+)/);
+                        if (!blogIdMatch) return;
+                        
+                        // logNo 추출 (10자리 이상의 숫자로 한정하여 다른 숫자(예: blogId 자체의 숫자)가 오인되지 않게 주의)
+                        const logNoMatch = href.match(/logNo=(\d+)/) || href.match(/\/(\d{10,})(?:\?|$|#)/);
+                        if (!logNoMatch) return;
+
+                        const blogId = blogIdMatch[1];
+                        const logNo = logNoMatch[1];
+                        
+                        if (['FeedList.naver', 'CommentList.naver', 'Recommendation.naver'].includes(blogId)) return;
+
+                        // 가장 가까운 피드 컨테이너 혹은 리스트 아이템 찾기
+                        // 컨테이너를 찾는 이유는 광고/추천 여부를 파악하기 위함입니다.
+                        const container = linkEl.closest('li, article, div[class*="card"], div[class*="item"]') || linkEl.parentElement;
+                        
+                        if (container) {
+                            // 추천/발견 섹션 제외
+                            const isRecommendSection = !!container.closest('[class*="recommend_section"], [class*="discover_section"], [class*="ad_section"]');
+                            if (isRecommendSection) return;
+
+                            // 개별 아이템 수준의 추천/광고 텍스트 확인
+                            const hasFollowBtn = !!container.querySelector('[class*="add_btn"], [class*="follow_btn"]');
+                            const innerText = container.textContent || "";
+                            const isRecommendText = innerText.includes('추천글') || innerText.includes('추천 블로그') || innerText.includes('광고');
+                            const isRecommendMark = !!container.querySelector('[class*="recommend"], [id*="recommend"], .spcb, .spc_txt, .text_ad');
+
+                            // 추천글이나 광고가 "아니라면" 수집 (이웃 추가 버튼이 있는 것도 추천글이므로 제외하려면 !hasFollowBtn 조건 유지 필요하나 로직상 기존대로)
+                            if (hasFollowBtn || isRecommendText || isRecommendMark) return;
+                        }
+
+                        // 제목 추출: 1) 컨테이너 내의 강조 태그, 2) 실패시 a 태그 자체 텍스트
+                        let titleText = "제목 없음";
+                        if (container) {
+                            const titleEl = container.querySelector('strong, h3, [class*="title"], .title');
+                            if (titleEl && titleEl.textContent) titleText = titleEl.textContent.trim();
+                            else titleText = linkEl.textContent?.trim() || "";
+                        } else {
+                            titleText = linkEl.textContent?.trim() || "";
+                        }
+                        
+                        // 내용이 비어있으면(이미지만 있는 a 태그 등) 무시 처리 시도 (단, 사진 피드의 경우 남겨둠)
+
+                        results.push({ url: href, blogId, logNo, title: titleText });
+                    });
+                    return results;
+                });
+
+                // 누적 추가
+                currentPosts.forEach(post => {
+                    const key = `${post.blogId}_${post.logNo}`;
+                    if (!collectedFeedMap.has(key)) {
+                        collectedFeedMap.set(key, post);
+                    }
+                });
+
+                // 스크롤 이동 및 대기
                 await this.page.evaluate(() => window.scrollBy(0, 1500));
                 await this.page.waitForTimeout(500);
             }
 
-            const feedPosts = await this.page.evaluate(() => {
-                const containers = Array.from(document.querySelectorAll('.card_item, .feed_card_item, li[class*="item"], div[class*="item"]'));
-                const results: { url: string, blogId: string, logNo: string, title: string }[] = [];
-                const seenLogNos = new Set();
-
-                containers.forEach(container => {
-                    const linkEl = container.querySelector('a');
-                    if (!linkEl) return;
-                    const href = linkEl.href;
-                    const blogIdMatch = href.match(/blogId=([^&]+)/) || href.match(/m\.blog\.naver\.com\/([^\/]+)\/(\d+)/);
-                    if (!blogIdMatch) return;
-                    const logNoMatch = href.match(/logNo=(\d+)/) || href.match(/\/(\d+)\??/);
-                    if (!logNoMatch) return;
-
-                    const blogId = blogIdMatch[1];
-                    const logNo = logNoMatch[logNoMatch.length - 1];
-                    if (blogId === 'FeedList.naver' || blogId === 'CommentList.naver') return;
-
-                    const key = `${blogId}_${logNo}`;
-                    if (seenLogNos.has(key)) return;
-
-                    const hasFollowBtn = !!container.querySelector('[class*="add_btn"], [class*="follow_btn"]');
-                    const innerText = container.textContent || "";
-                    const isRecommendText = innerText.includes('추천글') || innerText.includes('추천 블로그') || innerText.includes('광고');
-                    const isRecommendMark = !!container.querySelector('[class*="recommend"], [id*="recommend"], .spcb, .spc_txt, .text_ad');
-
-                    if (!(hasFollowBtn || isRecommendText || isRecommendMark)) {
-                        seenLogNos.add(key);
-                        const titleEl = container.querySelector('strong, h3, [class*="title"], .title');
-                        results.push({ url: href, blogId, logNo, title: titleEl?.textContent?.trim() || "제목 없음" });
-                    }
-                });
-                return results;
-            });
+            const feedPosts = Array.from(collectedFeedMap.values());
 
             console.log(`[Bot] 이웃 새글 피드에서 ${feedPosts.length}개의 포스트를 발견했습니다.`);
 

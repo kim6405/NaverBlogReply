@@ -1,0 +1,4 @@
+Using profile: C:\Users\Win10\NaverBlogReply\.naver_session
+
+==== NEW LOGIC (A-tag based) RESULTS ====
+Total found posts: 0
