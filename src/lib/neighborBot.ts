@@ -121,12 +121,15 @@ export class NeighborBot {
 
     /**
      * 이웃 새글 피드 탐색 및 댓글 작성
+     * @returns { processedCount: number, repliesMade: number, failures: {target: string, reason: string}[] }
      */
-    async processNeighborFeed(generateReplyFn: (comment: string, images?: any[]) => Promise<string>, maxComments: number = 30): Promise<number> {
+    async processNeighborFeed(generateReplyFn: (comment: string, images?: any[]) => Promise<string>, maxComments: number = 30): Promise<{ processedCount: number, repliesMade: number, failures: {target: string, reason: string}[] }> {
         if (!this.page) throw new Error("Bot not initialized");
 
         console.log(`[Bot] 이웃 새글 피드를 탐색합니다... (최대 ${maxComments}건 댓글 작성)`);
         let repliesMade = 0;
+        let processedCount = 0;
+        const failures: { target: string, reason: string }[] = [];
 
         try {
             await this.page.goto("https://m.blog.naver.com/FeedList.naver?groupId=1", { waitUntil: "domcontentloaded" });
@@ -300,11 +303,16 @@ export class NeighborBot {
                                     });
                                 } else {
                                     console.log(`[Visit-Feed] 등록 버튼을 찾을 수 없습니다.`);
+                                    failures.push({ target: post.logNo, reason: '등록 버튼을 찾을 수 없습니다.' });
                                 }
                             } else {
                                 console.log(`[Visit-Feed] 댓글 입력에 실패했습니다.`);
+                                failures.push({ target: post.logNo, reason: '입력 요소 찾기 연산 실패.' });
                             }
-                        } catch (err: any) { console.error(`[Visit-Feed] 입력 중 오류: ${err.message}`); }
+                        } catch (err: any) {
+                            console.error(`[Visit-Feed] 입력 중 오류: ${err.message}`);
+                            failures.push({ target: post.logNo, reason: err.message });
+                        }
                     } else {
                         console.log(`[Visit-Feed] 이미 댓글이 존재합니다. 기록 업데이트.`);
                         await prisma.visitHistory.upsert({
@@ -315,16 +323,19 @@ export class NeighborBot {
                     }
                 } catch (e: any) {
                     console.error(`[Visit-Feed] 오류: ${e.message}`);
+                    failures.push({ target: post.logNo, reason: e.message });
                 } finally {
+                    processedCount++;
                     await newPage?.close().catch(() => { });
                 }
             }
         } catch (e: any) {
             console.error(`[Bot] 피드 탐색 중 오류: ${e.message}`);
+            failures.push({ target: 'Feed Crawl', reason: e.message });
         }
 
-        console.log(`[Bot] 이웃 새글 탐색 완료. 총 ${repliesMade}건 답방 작성.`);
-        return repliesMade;
+        console.log(`[Bot] 이웃 새글 탐색 완료. 스캔 ${processedCount}건, 총 ${repliesMade}건 답방 작성.`);
+        return { processedCount, repliesMade, failures };
     }
 
     /**

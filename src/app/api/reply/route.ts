@@ -44,17 +44,23 @@ export async function POST(request: Request) {
     // 1단계: 이웃 블로그 새글 탐색 및 댓글 작성 (최우선)
     // ───────────────────────────────────────────
     let feedReplyCount = 0;
+    let feedProcessedCount = 0;
     console.log("[자동화] 1단계: 이웃 새글 탐색 시작...");
     try {
-      feedReplyCount = await bot.processNeighborFeed(async (commentText, images) => {
+      const feedResult = await bot.processNeighborFeed(async (commentText, images) => {
         return await generateReply(commentText, images);
       });
+      feedReplyCount = feedResult.repliesMade;
+      feedProcessedCount = feedResult.processedCount;
+      if (feedResult.failures && feedResult.failures.length > 0) {
+        failures.push(...feedResult.failures);
+      }
       totalReplyCount += feedReplyCount;
     } catch (e: any) {
       console.error(`[자동화] 1단계 오류: ${e.message}`);
       failures.push({ target: "이웃 새글 탐색", reason: e.message });
     }
-    console.log(`[자동화] 1단계 완료: 이웃 댓글 ${feedReplyCount}건 작성`);
+    console.log(`[자동화] 1단계 완료: 스캔 ${feedProcessedCount}건 중 이웃 댓글 ${feedReplyCount}건 작성`);
 
     // ───────────────────────────────────────────
     // 2단계: 내 블로그 최근 30일 포스트 스캔 (크롤링)
@@ -153,7 +159,7 @@ export async function POST(request: Request) {
     const report: CycleReport = {
       startTime,
       endTime,
-      neighborPostCount: crawledPosts.length,
+      neighborPostCount: feedProcessedCount + crawledPosts.length, // 이웃 새글 수 + 내 블로그 스캔 수
       neighborReplySuccess: feedReplyCount,
       myBlogReplySuccess: myBlogReplies,
       failures,

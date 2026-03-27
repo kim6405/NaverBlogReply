@@ -209,7 +209,7 @@ export class NaverBlogBot {
     /**
      * 이웃 새글 피드 탐색 및 댓글 작성
      */
-    async processNeighborFeed(generateReplyFn: (comment: string, images?: any[]) => Promise<string>): Promise<number> {
+    async processNeighborFeed(generateReplyFn: (comment: string, images?: any[]) => Promise<string>): Promise<{ processedCount: number, repliesMade: number, failures: {target: string, reason: string}[] }> {
         if (!this.context || !this.page) throw new Error("Bot not initialized");
         const { NeighborBot } = await import('./neighborBot');
         const neighborBot = new NeighborBot(this.context, this.page, this.visitedNeighbors);
