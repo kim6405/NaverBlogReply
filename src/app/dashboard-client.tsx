@@ -3,55 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useState, useEffect, useRef, useCallback } from "react";
 
-
-// 사이클 간격 설정 (시간 단위)
+// 사이클 간격 표시용 (실제 스케줄링은 서버에서 수행)
 const MIN_INTERVAL_HOURS = 2;
 const MAX_INTERVAL_HOURS = 4;
-
-// 설정된 간격 사이 랜덤 밀리초 생성
-function getRandomInterval(): number {
-  const hours = MIN_INTERVAL_HOURS + Math.random() * (MAX_INTERVAL_HOURS - MIN_INTERVAL_HOURS);
-  return Math.round(hours * 60 * 60 * 1000);
-}
-
-/*
-// 1~3분 사이 랜덤 밀리초 생성 (테스트용)
-function getRandomInterval(): number {
-  const minMinutes = 1;
-  const maxMinutes = 3;
-  const minutes = minMinutes + Math.random() * (maxMinutes - minMinutes);
-  return Math.round(minutes * 60 * 1000); // 1,000을 곱해 밀리초로 변환
-}
-*/
-
-
-/**
- * 현재 시간이 취침 시간(오후 11시 ~ 오전 9시)인지 판단합니다.
- */
-function isQuietTime(): boolean {
-  const hour = new Date().getHours();
-  return hour >= 23 || hour < 9;
-}
-
-/**
- * 다음 활동 시간까지 남은 시간을 "X시간 Y분" 형태로 반환합니다.
- */
-function getTimeUntilActive(): string {
-  const now = new Date();
-  const hour = now.getHours();
-  let targetHour = 9;
-  const target = new Date(now);
-  if (hour >= 9) {
-    // 이미 9시가 지났고 23시 이전이면 활동 중이므로 이 함수는 호출되지 않아야 하지만,
-    // 만약 23시 이후라면 다음날 9시로 설정
-    target.setDate(target.getDate() + 1);
-  }
-  target.setHours(targetHour, 0, 0, 0);
-  const diff = target.getTime() - now.getTime();
-  const hours = Math.floor(diff / (1000 * 60 * 60));
-  const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-  return `${hours}시간 ${minutes}분`;
-}
 
 export default function DashboardClient({
   initialStats,
@@ -67,20 +21,23 @@ export default function DashboardClient({
   const [blogId, setBlogId] = useState(defaultBlogId);
   const [displayStats, setDisplayStats] = useState(initialStats);
 
-  // 누적 카운트 (자동 실행 세션 동안 사이클별 누적 등)
+  // 누적 카운트
   const [cumulativeStats, setCumulativeStats] = useState({
-    newComments: 0,      // 신규 댓글 누적
-    totalReplies: 0,     // 총 작성 댓글 누적
-    activePosts: 0,      // 진행 중인 포스트 (누적은 아니지만 자동 실행 전엔 0으로 시작)
+    newComments: 0,
+    totalReplies: 0,
+    activePosts: 0,
   });
 
-  // 자동화 상태
+  // 서버 스케줄러 상태
   const [autoStatus, setAutoStatus] = useState<"stopped" | "running" | "paused" | "working" | "quiet">("stopped");
   const [isWorking, setIsWorking] = useState(false);
-  const [nextRunTime, setNextRunTime] = useState<Date | null>(null);
   const [countdown, setCountdown] = useState("");
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [nextRunTimeStr, setNextRunTimeStr] = useState<string | null>(null);
+
+  // 폴링 관련 ref
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const logIndexRef = useRef(0);
 
   // Hydration 불일치 방지를 위해 클라이언트 마운트 후 초기 로그 설정
   useEffect(() => {
@@ -88,9 +45,12 @@ export default function DashboardClient({
       { time: new Date().toLocaleTimeString(), type: 'info', msg: '시스템 초기화 완료.' },
       { time: new Date().toLocaleTimeString(), type: 'info', msg: '사용자 인증 세션 확인됨.' },
     ]);
+
+    // 마운트 시 서버 스케줄러 상태 확인
+    fetchSchedulerStatus();
   }, []);
 
-  // initialStats가 서버에서 갱신되어 올 때 반영 (진행 중인 포스트만 업데이트)
+  // initialStats가 서버에서 갱신되어 올 때 반영
   useEffect(() => {
     setDisplayStats((prev: any) => ({
       ...prev,
@@ -103,107 +63,69 @@ export default function DashboardClient({
   }, []);
 
   // ────────────────────────────────────────────
-  // 핵심: 한 사이클 실행 (이웃 방문 → 스캔 → 대댓글)
+  // 서버 스케줄러 상태 폴링
   // ────────────────────────────────────────────
-  const runOneCycle = useCallback(async () => {
-    // 취침 시간 체크
-    if (isQuietTime()) {
-      setAutoStatus("quiet");
-      addLog('info', `취침 시간입니다. ${getTimeUntilActive()} 후에 자동으로 재개됩니다.`);
-      return;
-    }
-
-    if (!blogId.trim()) {
-      addLog('error', '블로그 ID가 설정되지 않아 사이클을 건너뜁니다.');
-      return;
-    }
-
-    setIsWorking(true);
-    setAutoStatus("working");
-    addLog('scan', '🔄 자동 사이클 시작: 이웃 새글 탐색 → 내 블로그 스캔 → 댓글 작성...');
-
+  const fetchSchedulerStatus = useCallback(async () => {
     try {
-      const res = await fetch(`/api/reply?blogId=${encodeURIComponent(blogId.trim())}`, { method: 'POST' });
+      const res = await fetch(`/api/scheduler?sinceLogIndex=${logIndexRef.current}`);
       const data = await res.json();
 
-      if (data.skipped) {
-        addLog('info', data.reason);
-      } else if (data.success) {
-        addLog('success', `✅ 사이클 완료: 총 ${data.replyCount}건의 댓글을 작성했습니다.`);
-
-        // 사이클 완료 시 누적 카운트 업데이트
-        if (data.cycleStats) {
-          setCumulativeStats(prev => ({
-            newComments: prev.newComments + (data.cycleStats.newComments || 0),
-            totalReplies: prev.totalReplies + (data.replyCount || 0),
-            activePosts: data.cycleStats.scannedPosts ?? prev.activePosts, // 최신 값 갱신
-          }));
-        }
-
-        router.refresh();
+      // 상태 업데이트
+      if (data.status === "stopped") {
+        setAutoStatus(prev => {
+          // 서버가 stopped이지만 클라이언트에서 paused로 표시했다면 유지
+          if (prev === "paused") return "paused";
+          return "stopped";
+        });
       } else {
-        throw new Error(data.error || "작업 중 오류 발생");
+        setAutoStatus(data.status);
       }
-    } catch (err: any) {
-      addLog('error', `❌ 사이클 오류: ${err.message}`);
-    } finally {
-      setIsWorking(false);
-      // 아직 "running" 상태라면 다시 running으로 복귀
-      setAutoStatus(prev => (prev === "working" ? "running" : prev));
 
-      // 다음 실행 시간 설정 (2~4시간 랜덤)
-      const interval = getRandomInterval();
-      const next = new Date(Date.now() + interval);
-      const intervalMin = Math.round(interval / 60000);
-      setNextRunTime(next);
-      addLog('info', `다음 사이클: ${next.toLocaleTimeString('ko-KR')} (약 ${Math.floor(intervalMin / 60)}시간 ${intervalMin % 60}분 후)`);
+      setIsWorking(data.status === "working");
+      setNextRunTimeStr(data.nextRunTime);
+
+      // 서버에서 온 새 로그 추가
+      if (data.logs && data.logs.length > 0) {
+        setLogs(prev => [...prev, ...data.logs]);
+        logIndexRef.current = data.totalLogCount;
+      }
+
+      // 사이클 결과가 있으면 누적 카운트 업데이트
+      if (data.lastCycleResult) {
+        const result = data.lastCycleResult;
+        setCumulativeStats(prev => ({
+          newComments: prev.newComments,
+          totalReplies: prev.totalReplies + (result.replyCount || 0),
+          activePosts: result.scannedPosts ?? prev.activePosts,
+        }));
+        router.refresh();
+      }
+    } catch {
+      // 네트워크 오류는 무시 (폴링 재시도)
     }
-  }, [blogId, addLog, router]);
+  }, [router]);
 
   // ────────────────────────────────────────────
-  // 타이머 관리: autoStatus가 "running"이면 주기적으로 실행
+  // 서버 상태 폴링 타이머
   // ────────────────────────────────────────────
   useEffect(() => {
-    // 기존 타이머 정리
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
     }
 
-    if (autoStatus === "running") {
-      // 처음 시작하거나, nextRunTime이 없으면 즉시 한 사이클 실행
-      if (!nextRunTime) {
-        runOneCycle();
-      }
+    // 실행 중이면 5초마다 폴링, 그 외에는 30초마다
+    const isActive = autoStatus === "running" || autoStatus === "working" || autoStatus === "quiet";
+    const pollInterval = isActive ? 5000 : 30000;
 
-      timerRef.current = setInterval(() => {
-        // 매 분마다 체크: 취침 시간이면 상태를 quiet로, 아니면 다음 실행시간 도래 여부 확인
-        if (isQuietTime()) {
-          setAutoStatus("quiet");
-          return;
-        }
-
-        if (nextRunTime && Date.now() >= nextRunTime.getTime()) {
-          runOneCycle();
-        }
-      }, 60 * 1000); // 1분마다 체크
-    }
-
-    if (autoStatus === "quiet") {
-      // 취침 시간 중에도 1분마다 체크하여 활동 시간이 되면 자동 재개
-      timerRef.current = setInterval(() => {
-        if (!isQuietTime()) {
-          addLog('info', '🌅 활동 시간이 되었습니다. 자동 사이클을 재개합니다.');
-          setAutoStatus("running");
-          setNextRunTime(null); // 즉시 실행되도록 리셋
-        }
-      }, 60 * 1000);
+    if (autoStatus !== "stopped") {
+      pollRef.current = setInterval(fetchSchedulerStatus, pollInterval);
     }
 
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [autoStatus, nextRunTime, runOneCycle, addLog]);
+  }, [autoStatus, fetchSchedulerStatus]);
 
   // ────────────────────────────────────────────
   // 카운트다운 표시
@@ -211,9 +133,9 @@ export default function DashboardClient({
   useEffect(() => {
     if (countdownRef.current) clearInterval(countdownRef.current);
 
-    if ((autoStatus === "running" || autoStatus === "quiet") && nextRunTime) {
+    if ((autoStatus === "running" || autoStatus === "quiet") && nextRunTimeStr) {
       const updateCountdown = () => {
-        const diff = nextRunTime.getTime() - Date.now();
+        const diff = new Date(nextRunTimeStr).getTime() - Date.now();
         if (diff <= 0) {
           setCountdown("곧 실행...");
           return;
@@ -232,58 +154,81 @@ export default function DashboardClient({
     return () => {
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [autoStatus, nextRunTime]);
+  }, [autoStatus, nextRunTimeStr]);
 
   // ────────────────────────────────────────────
-  // 버튼 핸들러
+  // 버튼 핸들러 — 서버 스케줄러 API 호출
   // ────────────────────────────────────────────
   const handleStart = async () => {
     if (!blogId.trim()) {
       alert("네이버 블로그 아이디를 먼저 입력해주세요.");
       return;
     }
-    addLog('info', `🚀 자동 실행을 시작합니다. (${MIN_INTERVAL_HOURS}~${MAX_INTERVAL_HOURS}시간 주기)`);
-    // 자동 실행 시작 시 로컬 카운트 초기화
+    addLog('info', `🚀 자동 실행을 시작합니다. (${MIN_INTERVAL_HOURS}~${MAX_INTERVAL_HOURS}시간 주기, 서버 스케줄러)`);
     setCumulativeStats({ newComments: 0, totalReplies: 0, activePosts: 0 });
-    setAutoStatus("running");
-    setNextRunTime(null); // 즉시 첫 사이클 트리거
+    logIndexRef.current = 0;
 
-    // 서버에 상태 저장
+    // 서버 스케줄러 시작
+    await fetch('/api/scheduler', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start', blogId: blogId.trim() })
+    });
+
+    // 서버에 상태 저장 (기존 settings API도 호출)
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'start', blogId: blogId.trim() })
     });
+
+    setAutoStatus("running");
+    // 즉시 상태 폴링 시작
+    fetchSchedulerStatus();
   };
 
   const handlePause = async () => {
     addLog('info', '⏸️ 자동 실행이 일시정지되었습니다.');
-    setAutoStatus("paused");
-    setNextRunTime(null);
+
+    await fetch('/api/scheduler', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'pause', blogId: blogId.trim() })
+    });
 
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'pause', blogId: blogId.trim() })
     });
+
+    setAutoStatus("paused");
+    setNextRunTimeStr(null);
   };
 
   const handleStop = async () => {
     addLog('info', '⏹️ 자동 실행이 완전히 종료되었습니다.');
-    setAutoStatus("stopped");
-    setNextRunTime(null);
+
+    await fetch('/api/scheduler', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'stop', blogId: blogId.trim() })
+    });
 
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'stop', blogId: blogId.trim() })
     });
+
+    setAutoStatus("stopped");
+    setNextRunTimeStr(null);
   };
 
   // 상태별 표시 정보
   const statusConfig: Record<string, { label: string; color: string; dotClass: string }> = {
     stopped: { label: "대기 중", color: "text-slate-400", dotClass: "bg-slate-500" },
-    running: { label: "자동 실행 중", color: "text-green-400", dotClass: "bg-green-500 animate-pulse shadow-[0_0_10px_rgba(34,197,94,1)]" },
+    running: { label: "자동 실행 중 (서버)", color: "text-green-400", dotClass: "bg-green-500 animate-pulse shadow-[0_0_10px_rgba(34,197,94,1)]" },
     working: { label: "작업 수행 중...", color: "text-yellow-400", dotClass: "bg-yellow-500 animate-spin" },
     paused: { label: "일시 정지됨", color: "text-orange-400", dotClass: "bg-orange-500" },
     quiet: { label: "취침 시간 (자동 대기)", color: "text-blue-400", dotClass: "bg-blue-500 animate-pulse" },
@@ -377,6 +322,7 @@ export default function DashboardClient({
           <p>• <strong>자동 실행 시작</strong>: 즉시 첫 사이클을 실행하고, 이후 {MIN_INTERVAL_HOURS}~{MAX_INTERVAL_HOURS}시간 간격으로 랜덤 반복합니다.</p>
           <p>• <strong>취침 시간</strong>(오후 11시 ~ 오전 9시)에는 자동으로 작업이 중단되며, 오전 9시에 자동 재개됩니다.</p>
           <p>• 실행 순서: 이웃 새글 댓글(최대 30개) → 내 블로그 포스트 스캔(30일) → 댓글 작성</p>
+          <p>• <strong className="text-green-400">🖥️ 서버 스케줄러</strong>: 타이머가 서버에서 동작하므로 브라우저를 닫거나 노트북 덮개를 덮어도 정상 작동합니다.</p>
         </div>
       </div>
 

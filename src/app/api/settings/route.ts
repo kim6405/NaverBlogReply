@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { closeBot } from "@/lib/botManager";
+import { stopScheduler } from "@/lib/scheduler";
 
 /**
  * GET: 현재 자동화 상태를 조회합니다.
@@ -41,8 +42,9 @@ export async function POST(request: Request) {
 
     const isAutoRunning = action === "start";
 
-    // 종료 시 브라우저도 함께 닫기
+    // 종료 시 브라우저 + 서버 스케줄러도 함께 종료
     if (action === "stop") {
+      stopScheduler();
       await closeBot();
     }
 

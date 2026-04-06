@@ -145,6 +145,18 @@ export class NeighborBot {
                     const links = Array.from(document.querySelectorAll('a'));
                     const results: { url: string, blogId: string, logNo: string, title: string }[] = [];
 
+                    // ── 추천글/광고 필터 키워드 ──
+                    const RECOMMEND_KEYWORDS = ['추천글', '추천 블로그', '추천 포스트', '맞춤 콘텐츠', '발견', '콘텐츠 추천', '광고', 'AD', '협찬', '체험단', '이 블로그를 소개합니다'];
+                    const RECOMMEND_SECTION_SELECTORS = [
+                        '[class*="recommend"]', '[id*="recommend"]',
+                        '[class*="discover"]', '[id*="discover"]',
+                        '[class*="ad_section"]', '[class*="ad_area"]',
+                        '[class*="suggest"]', '[id*="suggest"]',
+                        '[class*="content_break"]',
+                        '[data-type="recommend"]', '[data-type="ad"]', '[data-type="discover"]',
+                        '[data-tiara-action-name*="추천"]', '[data-tiara-action-name*="recommend"]',
+                    ].join(', ');
+
                     links.forEach(linkEl => {
                         const href = linkEl.href;
                         // 기본적으로 블로그 포스트 권장 URL 형식을 따르는지 확인
@@ -166,23 +178,40 @@ export class NeighborBot {
                         
                         if (['FeedList.naver', 'CommentList.naver', 'Recommendation.naver'].includes(blogId)) return;
 
-                        // 가장 가까운 피드 컨테이너 혹은 리스트 아이템 찾기
-                        // 컨테이너를 찾는 이유는 광고/추천 여부를 파악하기 위함입니다.
+                        // ── 피드 아이템 컨테이너 찾기 ──
                         const container = linkEl.closest('li, article, div[class*="card"], div[class*="item"]') || linkEl.parentElement;
                         
                         if (container) {
-                            // 추천/발견 섹션 제외
-                            const isRecommendSection = !!container.closest('[class*="recommend_section"], [class*="discover_section"], [class*="ad_section"]');
+                            // 1) 상위 섹션이 추천/발견/광고 영역인지 확인
+                            const isRecommendSection = !!container.closest(RECOMMEND_SECTION_SELECTORS);
                             if (isRecommendSection) return;
 
-                            // 개별 아이템 수준의 추천/광고 텍스트 확인
-                            const hasFollowBtn = !!container.querySelector('[class*="add_btn"], [class*="follow_btn"]');
-                            const innerText = container.textContent || "";
-                            const isRecommendText = innerText.includes('추천글') || innerText.includes('추천 블로그') || innerText.includes('광고');
-                            const isRecommendMark = !!container.querySelector('[class*="recommend"], [id*="recommend"], .spcb, .spc_txt, .text_ad');
+                            // 2) 컨테이너 자체의 class/id/data 속성에 recommend/ad/discover 포함 여부
+                            const containerAttrs = (container.className || '') + ' ' + (container.id || '') + ' ' + ((container as HTMLElement).dataset?.type || '');
+                            if (/recommend|discover|ad_|suggest|promotion/i.test(containerAttrs)) return;
 
-                            // 추천글이나 광고가 "아니라면" 수집 (이웃 추가 버튼이 있는 것도 추천글이므로 제외하려면 !hasFollowBtn 조건 유지 필요하나 로직상 기존대로)
-                            if (hasFollowBtn || isRecommendText || isRecommendMark) return;
+                            // 3) 팔로우/이웃추가 버튼 존재 여부 (추천글에만 있는 요소)
+                            const hasFollowBtn = !!container.querySelector(
+                                '[class*="add_btn"], [class*="follow_btn"], [class*="buddy_add"], ' +
+                                'button[class*="add"], a[class*="add_neighbor"], [class*="btn_follow"]'
+                            );
+                            if (hasFollowBtn) return;
+
+                            // 4) 컨테이너 텍스트 내 추천/광고 키워드 확인
+                            const innerText = (container as HTMLElement).innerText || container.textContent || "";
+                            const isRecommendText = RECOMMEND_KEYWORDS.some(kw => innerText.includes(kw));
+                            if (isRecommendText) return;
+
+                            // 5) 추천 마크 DOM 요소 확인
+                            const isRecommendMark = !!container.querySelector(
+                                '[class*="recommend"], [id*="recommend"], .spcb, .spc_txt, .text_ad, ' +
+                                '[class*="badge_ad"], [class*="label_ad"], [class*="ico_ad"], ' +
+                                '[class*="discover"], [class*="suggest"]'
+                            );
+                            if (isRecommendMark) return;
+                            
+                            // 6) 이웃 글인지 긍정적 확인: 이웃/서로이웃 배지가 있는지 확인
+                            //    (배지가 없어도 이웃 피드에 나올 수 있으므로 차단 조건이 아닌 로깅용)
                         }
 
                         // 제목 추출: 1) 컨테이너 내의 강조 태그, 2) 실패시 a 태그 자체 텍스트
@@ -194,8 +223,6 @@ export class NeighborBot {
                         } else {
                             titleText = linkEl.textContent?.trim() || "";
                         }
-                        
-                        // 내용이 비어있으면(이미지만 있는 a 태그 등) 무시 처리 시도 (단, 사진 피드의 경우 남겨둠)
 
                         results.push({ url: href, blogId, logNo, title: titleText });
                     });
